@@ -1,8 +1,4 @@
 mod agent;
-/// Pulse - A URL monitoring system
-///
-/// This module serves as the entry point for the Pulse application.
-/// It initializes the controller which manages the entire URL monitoring system.
 mod config;
 mod controller;
 mod logger;

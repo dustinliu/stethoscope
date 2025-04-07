@@ -8,7 +8,7 @@
 use crate::message::{Endpoint, QueryResult};
 use crate::task::Runnable;
 use async_trait::async_trait;
-use log::{debug, warn};
+use log::warn;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 
@@ -22,7 +22,7 @@ const WORKER_NAME_PREFIX: &str = "Worker";
 /// * `url_receiver` - Receiver for incoming URL queries, wrapped in Arc<Mutex> for thread-safe access
 /// * `result_sender` - Sender to transmit processed query results back to the controller
 /// * `client` - Shared HTTP client instance for making requests
-/// * `shutdown_flag` - Flag to indicate if the worker should shut down
+/// * `shutdown_receiver` - Receiver for shutdown signals
 pub struct Worker {
     name: String,
     // Receiver for incoming URL queries, wrapped in Arc<Mutex> for thread-safe access
@@ -32,6 +32,7 @@ pub struct Worker {
     result_sender: mpsc::Sender<Endpoint>,
     // Shared HTTP client instance
     client: reqwest::Client,
+    // Receiver for shutdown signals
 }
 
 impl Worker {
@@ -113,7 +114,6 @@ impl Runnable for Worker {
         while let Some(endpoint) = self.receive_endpoint().await {
             self.process_endpoint(endpoint).await;
         }
-        debug!("Worker detected channel closed");
     }
 
     fn name(&self) -> &str {
