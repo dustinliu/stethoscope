@@ -1,0 +1,71 @@
+---
+description: 
+globs: *.rs
+alwaysApply: false
+---
+# Best practice for rust
+
+## Foundational
+Create idiomatic Rust code by following these principles:
+- Use proper ownership and borrowing patterns
+- Leverage the type system for safety
+- Handle errors with Result types
+- Implement proper trait bounds
+- Use Option for nullable values
+- Follow Rust naming conventions (snake_case for variables/functions, PascalCase for types)
+
+## Error Handling
+Implement functions with comprehensive error handling:
+- For library crate, use custom error types with thiserror, for application crate, use anyhow to handle error
+- Implement proper error propagation with the ? operator
+- Provide meaningful error messages in english
+- Make errors convertible from their source errors
+
+## For API Design
+To design a Rust API:
+- Uses builder pattern where appropriate
+- Leverages generic traits for flexibility
+- Provides both sync and async interfaces
+- Has clear documentation with examples
+- Follows the principle of least privilege for data access
+- Uses newtypes to prevent type confusion
+
+## For Performance
+Optimize Rust function for performance:
+- Minimize allocations, copies and clone
+- Use appropriate data structures (Vec, HashMap, BTreeMap)
+- Consider using references where appropriate
+- Analyze where Box, Rc, or Arc might be needed
+- Identify opportunities for parallel processing. 
+
+## For Testing
+Create comprehensive tests for this Rust code including:
+- Unit tests for individual functions
+- Integration tests for component interaction
+- Property-based tests using proptest
+- Documentation tests that serve as examples
+- Edge case handling for all inputs
+
+## For Concurrency
+Ensure thread-safe in Rust that:
+- Uses appropriate sync primitives (Mutex, RwLock, atomic types)
+- Avoids deadlocks through careful lock ordering
+- Handles poisoned locks appropriately
+- Uses channels for communication between threads
+- Properly manages thread lifetimes
+
+## For Code Review
+Review this Rust code for:
+- Potential memory safety issues
+- Inefficient patterns that could be improved
+- Better idiomatic alternatives
+- Concurrency issues
+- Potential panics
+- Better error handling approaches
+
+## To Implement a Specific Pattern
+Implement design pattern in Rust, considering:
+- How ownership affects traditional OOP patterns
+- How traits can be used instead of inheritance
+- How generics and associated types improve flexibility
+- How to maintain memory safety throughout

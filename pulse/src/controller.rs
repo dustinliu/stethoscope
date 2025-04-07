@@ -171,18 +171,21 @@ impl Controller {
 
         // Monitor and restart tasks if needed
         let mut interval = time::interval(Duration::from_secs(MONITOR_INTERVAL_SECS));
-        let mut shutdown = false;
+        let mut shutdown = shutdown_flag.load(std::sync::atomic::Ordering::Relaxed);
         while !shutdown {
             interval.tick().await;
             shutdown = shutdown_flag.load(std::sync::atomic::Ordering::Relaxed);
 
             // Check task health and replace failed ones
-            for (i, task) in tasks.iter().enumerate() {
-                if handles[i].is_finished() {
-                    let task = task.clone();
-                    handles[i] = tokio::spawn(async move {
-                        task.start().await;
-                    });
+            if !shutdown {
+                for (i, task) in tasks.iter().enumerate() {
+                    if handles[i].is_finished() {
+                        let task = task.clone();
+                        handles[i] = tokio::spawn(async move {
+                            task.start().await;
+                            debug!("task {} restarted", task.name());
+                        });
+                    }
                 }
             }
         }
