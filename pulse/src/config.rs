@@ -1,6 +1,18 @@
+/// Configuration module for the Pulse URL monitoring system
+///
+/// This module manages the global configuration settings for the application,
+/// including worker counts, agent counts, and timing intervals.
 use std::{sync::OnceLock, time::Duration};
 
-// Config struct definition
+/// Global configuration settings for the application
+///
+/// This struct holds all configurable parameters that affect the
+/// behavior of the URL monitoring system.
+///
+/// # Fields
+/// * `worker_num` - Number of worker threads for processing URLs
+/// * `agent_num` - Number of agent threads for managing workers
+/// * `check_interval` - Duration between health checks
 #[derive(Debug)]
 pub struct Config {
     worker_num: usize,
@@ -8,31 +20,47 @@ pub struct Config {
     check_interval: Duration,
 }
 
+/// Global singleton instance of the configuration
 static INSTANCE: OnceLock<Config> = OnceLock::new();
 
 impl Config {
+    /// Creates a new Config instance with default values
+    ///
+    /// # Returns
+    /// A new Config instance with the following defaults:
+    /// * 50 worker threads
+    /// * 1 agent thread
+    /// * 5 second check interval
     fn new() -> Self {
         Config {
-            worker_num: 50,
+            worker_num: 2,
             agent_num: 1,
             check_interval: Duration::from_secs(5),
         }
     }
 
+    /// Returns the number of worker threads
     pub fn worker_num(&self) -> usize {
         self.worker_num
     }
 
+    /// Returns the number of agent threads
     pub fn agent_num(&self) -> usize {
         self.agent_num
     }
 
-    //TODO: change the default value to 5 minutes
+    /// Returns the duration between health checks
+    ///
+    /// TODO: Change the default value to 5 minutes
     pub fn check_interval(&self) -> Duration {
         self.check_interval
     }
 }
 
+/// Returns the global singleton instance of Config
+///
+/// This function ensures that only one Config instance exists
+/// throughout the application's lifecycle.
 pub fn instance() -> &'static Config {
     INSTANCE.get_or_init(Config::new)
 }

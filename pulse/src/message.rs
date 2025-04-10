@@ -12,7 +12,8 @@ use reqwest::StatusCode;
 /// * `retry_count` - Maximum number of retry attempts for a failed request
 /// * `timeout` - Maximum time to wait for the response
 #[derive(Debug, Clone)]
-pub struct Request {
+pub struct Endpoint {
+    pub id: u64,
     pub url: String,
     pub retry_delay: std::time::Duration,
     pub retry_count: u8,
@@ -25,9 +26,9 @@ pub struct Request {
 /// * `request` - The endpoint configuration
 /// * `result` - Vector of results from each monitoring attempt
 #[derive(Debug, Clone)]
-pub struct Endpoint {
-    pub request: Request,
-    pub result: Vec<QueryResult>,
+pub struct EndpointResponse {
+    pub request: Endpoint,
+    pub results: Vec<QueryResult>,
 }
 
 /// Represents the result of a single endpoint monitoring attempt
@@ -37,7 +38,6 @@ pub struct Endpoint {
 /// * `timestamp` - When the query was executed
 /// * `duration` - Duration from sending request to receiving response
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct QueryResult {
     pub status: StatusCode,
     pub timestamp: chrono::DateTime<chrono::Utc>,

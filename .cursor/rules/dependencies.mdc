@@ -6,5 +6,5 @@ alwaysApply: false
 
 # For dependencies
 - never change the version to older one
-- always search the web for latest stable version
+- always search @Web for latest stable version
 - only use necessary feature

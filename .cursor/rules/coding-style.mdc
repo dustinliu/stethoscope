@@ -1,0 +1,39 @@
+---
+description: 
+globs: *.rs
+alwaysApply: false
+---
+# Rust Coding Style Guidelines: Key Points
+
+## Formatting
+* Indentation: 4 spaces (no tabs).
+* Line Width: Aim for ~100 characters max.
+* Trailing Commas: Recommended in multi-line lists (`enum` variants, `struct` fields, function args, array/vector literals) for cleaner diffs.
+
+## Naming Conventions
+* Types: `UpperCamelCase` (`struct`, `enum`, `trait`, type aliases).
+* Variables/Functions/Modules: `snake_case`.
+* Constants/Statics: `SCREAMING_SNAKE_CASE` (`const`, `static`).
+* Lifetimes: Short, lowercase, start with `'` (e.g., `'a`, `'b`, `'static`).
+
+## Comments & Documentation
+* Doc Comments: `///` for public API items (functions, types, etc.). Use Markdown. Explain purpose, usage, parameters, returns, errors (`Result`), panics, and safety (for `unsafe`).
+* Module/Crate Docs: `//!` at the beginning of the file or `mod` block.
+* Implementation Comments: `//` for internal details.
+
+## Modularity & Visibility
+* Modules: Use `mod` to group related functionality.
+* Visibility: Use `pub` thoughtfully to define the public API vs internal implementation details.
+
+## Error Handling
+* Recoverable Errors: Use `Result<T, E>`.
+* Optional Values: Use `Option<T>`.
+* Avoid: `.unwrap()` and `.expect()` in library or production code where failure must be handled.
+* Panics: Use `panic!` primarily for unrecoverable errors or programming bugs (violations of invariants).
+
+## Idiomatic Usage (Often guided by `clippy`)
+* Iterators: Prefer iterators and methods like `map()`, `filter()`, `fold()`.
+* Pattern Matching: Leverage `match`, `if let`, `while let`.
+* Ownership/Borrowing: Respect the rules; avoid unnecessary `.clone()`.
+* Standard Types: Use `String` vs `&str`, `Vec<T>` vs `&[T]` appropriately.
+* Derive: Use `#[derive(...)]` for common traits (`Debug`, `Clone`, `PartialEq`, etc.) when applicable.

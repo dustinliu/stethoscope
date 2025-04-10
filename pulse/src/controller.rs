@@ -1,20 +1,16 @@
-use crate::agent::{Dispatcher, Reporter};
-use crate::config;
-use crate::message::Endpoint;
-use crate::task::Runnable;
-use crate::worker::Worker;
-/// Controller module for the Pulse URL monitoring system
-///
-/// This module implements the Controller component which is the central coordinator
-/// for the entire URL monitoring system. It manages the lifecycle of agents and workers,
-/// handles communication channels, and ensures proper shutdown of the system.
+use crate::{
+    agent::{Dispatcher, Reporter, Worker},
+    config,
+    message::{Endpoint, EndpointResponse},
+    task::Runnable,
+};
 use log::{debug, info, warn};
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::{Mutex, mpsc, watch};
-use tokio::time;
-use tokio::time::timeout;
+use std::{sync::Arc, time::Duration};
+use tokio::{
+    signal::unix::{SignalKind, signal},
+    sync::{Mutex, mpsc, watch},
+    time::{interval, timeout},
+};
 
 const MONITOR_INTERVAL_SECS: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT_SECS: Duration = Duration::from_secs(10);
@@ -54,7 +50,7 @@ impl Controller {
         let (url_sender, url_receiver) = mpsc::channel::<Endpoint>(100);
 
         // Create channels for result communication
-        let (result_sender, result_receiver) = mpsc::channel::<Endpoint>(100);
+        let (result_sender, result_receiver) = mpsc::channel::<EndpointResponse>(100);
 
         // Create Arc wrappers for the receivers to allow sharing across threads
         let url_receiver = Arc::new(Mutex::new(url_receiver));
@@ -149,7 +145,7 @@ impl Controller {
     /// 3. Returns a handle to the monitoring task
     fn run_reporter(
         &self,
-        result_receiver: Arc<Mutex<mpsc::Receiver<Endpoint>>>,
+        result_receiver: Arc<Mutex<mpsc::Receiver<EndpointResponse>>>,
         shutdown_receiver: watch::Receiver<bool>,
     ) -> tokio::task::JoinHandle<()> {
         Self::create_and_run_tasks(
@@ -167,7 +163,7 @@ impl Controller {
     /// 3. Returns a handle to the monitoring task
     fn run_workers(
         &mut self,
-        result_sender: mpsc::Sender<Endpoint>,
+        result_sender: mpsc::Sender<EndpointResponse>,
         url_receiver: Arc<Mutex<mpsc::Receiver<Endpoint>>>,
         shutdown_receiver: watch::Receiver<bool>,
     ) -> tokio::task::JoinHandle<()> {
@@ -193,7 +189,7 @@ impl Controller {
         }
 
         // Monitor and restart tasks if needed
-        let mut interval = time::interval(MONITOR_INTERVAL_SECS);
+        let mut interval = interval(MONITOR_INTERVAL_SECS);
         let mut shutdown = *shutdown_receiver.borrow();
         while !shutdown {
             interval.tick().await;
