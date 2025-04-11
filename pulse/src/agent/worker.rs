@@ -4,7 +4,7 @@
 /// 1. Processing URL monitoring requests by making HTTP requests
 /// 2. Handling various HTTP response scenarios (success, error, timeout)
 /// 3. Reporting results back to the controller
-use crate::message::{Endpoint, EndpointResponse, QueryResult};
+use crate::message::{Endpoint, EndpointStatus, QueryResult};
 use crate::task::Runnable;
 use async_trait::async_trait;
 use log::warn;
@@ -27,7 +27,7 @@ const WORKER_NAME_PREFIX: &str = "Worker";
 pub struct Worker {
     name: String,
     url_receiver: Arc<Mutex<mpsc::Receiver<Endpoint>>>,
-    result_sender: mpsc::Sender<EndpointResponse>,
+    result_sender: mpsc::Sender<EndpointStatus>,
     client: reqwest::Client,
 }
 
@@ -44,7 +44,7 @@ impl Worker {
     pub fn new(
         id: usize,
         url_receiver: Arc<Mutex<mpsc::Receiver<Endpoint>>>,
-        result_sender: mpsc::Sender<EndpointResponse>,
+        result_sender: mpsc::Sender<EndpointStatus>,
     ) -> Self {
         Self {
             name: format!("{}-{}", WORKER_NAME_PREFIX, id),
@@ -111,7 +111,7 @@ impl Worker {
             }
         };
 
-        let response = EndpointResponse {
+        let response = EndpointStatus {
             request: endpoint,
             results: vec![result],
         };
@@ -140,7 +140,7 @@ impl Runnable for Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{Endpoint, EndpointResponse};
+    use crate::message::{Endpoint, EndpointStatus};
     use bytes::Bytes;
     use http_body_util::Empty;
     use hyper::service::service_fn;
@@ -178,7 +178,7 @@ mod tests {
     ///
     /// # Returns
     /// A tuple containing the processed endpoint and the server address
-    async fn run_worker_test<F>(response_fn: F, timeout: Duration) -> (EndpointResponse, SocketAddr)
+    async fn run_worker_test<F>(response_fn: F, timeout: Duration) -> (EndpointStatus, SocketAddr)
     where
         F: Fn() -> HyperResponse<Empty<Bytes>> + Clone + Send + 'static,
     {

@@ -51,7 +51,6 @@ impl Dispatcher {
             name: format!("{}-{}", DISPATCHER_NAME_PREFIX, id),
             url_sender,
             shutdown_receiver,
-            // endpoints_state: RwLock::new(HashMap::new()),
         }
     }
 

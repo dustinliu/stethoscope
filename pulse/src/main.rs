@@ -3,6 +3,7 @@
 /// This module serves as the entry point for the application and initializes
 /// all necessary components for URL monitoring functionality.
 mod agent;
+mod broker;
 mod config;
 mod controller;
 mod logger;

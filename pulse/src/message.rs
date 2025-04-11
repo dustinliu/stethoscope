@@ -13,7 +13,7 @@ use reqwest::StatusCode;
 /// * `timeout` - Maximum time to wait for the response
 #[derive(Debug, Clone)]
 pub struct Endpoint {
-    pub id: u64,
+    pub id: u32,
     pub url: String,
     pub retry_delay: std::time::Duration,
     pub retry_count: u8,
@@ -26,7 +26,7 @@ pub struct Endpoint {
 /// * `request` - The endpoint configuration
 /// * `result` - Vector of results from each monitoring attempt
 #[derive(Debug, Clone)]
-pub struct EndpointResponse {
+pub struct EndpointStatus {
     pub request: Endpoint,
     pub results: Vec<QueryResult>,
 }

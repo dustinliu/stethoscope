@@ -2,7 +2,7 @@
 ///
 /// This module implements the Reporter component which is responsible for
 /// processing and reporting the results of URL monitoring tasks.
-use crate::message::EndpointResponse;
+use crate::message::EndpointStatus;
 use crate::task::Runnable;
 use async_trait::async_trait;
 use log::trace;
@@ -25,7 +25,7 @@ const REPORTER_NAME_PREFIX: &str = "Reporter";
 /// * `shutdown_receiver` - Receiver for shutdown signals
 pub struct Reporter {
     name: String,
-    result_receiver: Arc<Mutex<mpsc::Receiver<EndpointResponse>>>,
+    result_receiver: Arc<Mutex<mpsc::Receiver<EndpointStatus>>>,
 }
 
 impl Reporter {
@@ -35,7 +35,7 @@ impl Reporter {
     /// * `id` - Unique identifier for this reporter
     /// * `result_receiver` - Channel for receiving results from workers
     /// * `shutdown_receiver` - Receiver for shutdown signals
-    pub fn new(id: usize, result_receiver: Arc<Mutex<mpsc::Receiver<EndpointResponse>>>) -> Self {
+    pub fn new(id: usize, result_receiver: Arc<Mutex<mpsc::Receiver<EndpointStatus>>>) -> Self {
         Self {
             name: format!("{}-{}", REPORTER_NAME_PREFIX, id),
             result_receiver,
@@ -64,7 +64,7 @@ impl Reporter {
     ///
     /// # Returns
     /// An Option containing the received Endpoint if available
-    async fn receive_result(&self) -> Option<EndpointResponse> {
+    async fn receive_result(&self) -> Option<EndpointStatus> {
         let mut receiver = self.result_receiver.lock().await;
         receiver.recv().await
     }

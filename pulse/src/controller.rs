@@ -1,7 +1,7 @@
 use crate::{
     agent::{Dispatcher, Reporter, Worker},
     config,
-    message::{Endpoint, EndpointResponse},
+    message::{Endpoint, EndpointStatus},
     task::Runnable,
 };
 use log::{debug, info, warn};
@@ -50,7 +50,7 @@ impl Controller {
         let (url_sender, url_receiver) = mpsc::channel::<Endpoint>(100);
 
         // Create channels for result communication
-        let (result_sender, result_receiver) = mpsc::channel::<EndpointResponse>(100);
+        let (result_sender, result_receiver) = mpsc::channel::<EndpointStatus>(100);
 
         // Create Arc wrappers for the receivers to allow sharing across threads
         let url_receiver = Arc::new(Mutex::new(url_receiver));
@@ -145,7 +145,7 @@ impl Controller {
     /// 3. Returns a handle to the monitoring task
     fn run_reporter(
         &self,
-        result_receiver: Arc<Mutex<mpsc::Receiver<EndpointResponse>>>,
+        result_receiver: Arc<Mutex<mpsc::Receiver<EndpointStatus>>>,
         shutdown_receiver: watch::Receiver<bool>,
     ) -> tokio::task::JoinHandle<()> {
         Self::create_and_run_tasks(
@@ -163,7 +163,7 @@ impl Controller {
     /// 3. Returns a handle to the monitoring task
     fn run_workers(
         &mut self,
-        result_sender: mpsc::Sender<EndpointResponse>,
+        result_sender: mpsc::Sender<EndpointStatus>,
         url_receiver: Arc<Mutex<mpsc::Receiver<Endpoint>>>,
         shutdown_receiver: watch::Receiver<bool>,
     ) -> tokio::task::JoinHandle<()> {
