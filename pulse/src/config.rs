@@ -16,7 +16,7 @@ use std::{sync::OnceLock, time::Duration};
 #[derive(Debug)]
 pub struct Config {
     worker_num: usize,
-    agent_num: usize,
+    reporter_num: usize,
     check_interval: Duration,
 }
 
@@ -34,7 +34,7 @@ impl Config {
     fn new() -> Self {
         Config {
             worker_num: 2,
-            agent_num: 1,
+            reporter_num: 1,
             check_interval: Duration::from_secs(5),
         }
     }
@@ -45,15 +45,15 @@ impl Config {
     }
 
     /// Returns the number of agent threads
-    pub fn agent_num(&self) -> usize {
-        self.agent_num
+    pub fn reporter_num(&self) -> usize {
+        self.reporter_num
     }
 
     /// Returns the duration between health checks
     ///
     /// TODO: Change the default value to 5 minutes
-    pub fn check_interval(&self) -> Duration {
-        self.check_interval
+    pub fn check_interval(&self) -> &Duration {
+        &self.check_interval
     }
 }
 

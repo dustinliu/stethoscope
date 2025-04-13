@@ -27,7 +27,7 @@ pub struct Endpoint {
 /// * `result` - Vector of results from each monitoring attempt
 #[derive(Debug, Clone)]
 pub struct EndpointStatus {
-    pub request: Endpoint,
+    pub endpoint: Endpoint,
     pub results: Vec<QueryResult>,
 }
 
@@ -39,6 +39,7 @@ pub struct EndpointStatus {
 /// * `duration` - Duration from sending request to receiving response
 #[derive(Debug, Clone)]
 pub struct QueryResult {
+    pub endpoint: Endpoint,
     pub status: StatusCode,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub duration: std::time::Duration,

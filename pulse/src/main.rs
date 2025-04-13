@@ -8,7 +8,7 @@ mod config;
 mod controller;
 mod logger;
 mod message;
-mod task;
+mod runnable;
 
 use controller::Controller;
 
@@ -22,6 +22,7 @@ use controller::Controller;
 async fn main() {
     logger::init_logger();
 
-    let mut controller = Controller::new();
+    // console_subscriber::init();
+    let controller = Controller::new();
     controller.start().await;
 }

@@ -1,10 +1,8 @@
 use crate::message::{Endpoint, EndpointStatus, QueryResult};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast, mpsc};
 
-static HOLDER: OnceLock<Holder> = OnceLock::new();
-
-struct Holder {
+pub struct Broker {
     endpoint_tx: mpsc::Sender<Endpoint>,
     endpoint_rx: Arc<Mutex<mpsc::Receiver<Endpoint>>>,
     result_tx: mpsc::Sender<QueryResult>,
@@ -13,8 +11,8 @@ struct Holder {
     status_rx: broadcast::Receiver<EndpointStatus>,
 }
 
-impl Holder {
-    fn new() -> Self {
+impl Broker {
+    pub fn new() -> Self {
         let (endpoint_tx, endpoint_rx) = mpsc::channel(100);
         let (result_tx, result_rx) = mpsc::channel(100);
         let (status_tx, status_rx) = broadcast::channel(100);
@@ -32,30 +30,49 @@ impl Holder {
         }
     }
 
-    fn instance() -> &'static Holder {
-        HOLDER.get_or_init(Self::new)
+    pub async fn send_endpoint(
+        &self,
+        endpoint: Endpoint,
+    ) -> Result<(), mpsc::error::SendError<Endpoint>> {
+        self.endpoint_tx.send(endpoint).await
+    }
+
+    pub async fn send_result(
+        &self,
+        result: QueryResult,
+    ) -> Result<(), mpsc::error::SendError<QueryResult>> {
+        self.result_tx.send(result).await
+    }
+
+    pub async fn send_status(
+        &self,
+        status: EndpointStatus,
+    ) -> Result<usize, broadcast::error::SendError<EndpointStatus>> {
+        self.status_tx.send(status)
+    }
+
+    pub async fn receive_endpoint(&self) -> Option<Endpoint> {
+        self.endpoint_rx.lock().await.recv().await
+    }
+
+    pub async fn receive_result(&self) -> Option<QueryResult> {
+        self.result_rx.lock().await.recv().await
+    }
+
+    pub async fn receive_status(&mut self) -> Result<EndpointStatus, broadcast::error::RecvError> {
+        self.status_rx.recv().await
     }
 }
 
-pub struct Broker {
-    endpoint_tx: mpsc::Sender<Endpoint>,
-    endpoint_rx: Arc<Mutex<mpsc::Receiver<Endpoint>>>,
-    result_tx: mpsc::Sender<QueryResult>,
-    result_rx: Arc<Mutex<mpsc::Receiver<QueryResult>>>,
-    status_tx: broadcast::Sender<EndpointStatus>,
-    status_rx: broadcast::Receiver<EndpointStatus>,
-}
-
-impl Broker {
-    pub fn instance() -> Self {
-        let holder = Holder::instance();
+impl Clone for Broker {
+    fn clone(&self) -> Self {
         Self {
-            endpoint_tx: holder.endpoint_tx.clone(),
-            endpoint_rx: holder.endpoint_rx.clone(),
-            result_tx: holder.result_tx.clone(),
-            result_rx: holder.result_rx.clone(),
-            status_tx: holder.status_tx.clone(),
-            status_rx: holder.status_tx.subscribe(),
+            endpoint_tx: self.endpoint_tx.clone(),
+            endpoint_rx: self.endpoint_rx.clone(),
+            result_tx: self.result_tx.clone(),
+            result_rx: self.result_rx.clone(),
+            status_tx: self.status_tx.clone(),
+            status_rx: self.status_tx.subscribe(),
         }
     }
 }
