@@ -72,7 +72,14 @@ impl Worker {
                     duration: start_time.elapsed(),
                 },
                 Err(e) => {
-                    if e.is_timeout() {
+                    if e.is_connect() {
+                        QueryResult {
+                            endpoint,
+                            status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                            timestamp,
+                            duration: start_time.elapsed(),
+                        }
+                    } else if e.is_timeout() {
                         QueryResult {
                             endpoint,
                             status: reqwest::StatusCode::REQUEST_TIMEOUT,
@@ -240,7 +247,7 @@ mod tests {
         broker.send_endpoint(endpoint).await.unwrap();
         let result = broker.receive_result().await.unwrap();
 
-        assert_eq!(result.status, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(result.status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
         assert!(result.duration.as_secs_f64() > 0.0);
     }
 }

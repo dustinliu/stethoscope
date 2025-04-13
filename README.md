@@ -1,4 +1,4 @@
-# spotlight
+# Stethoscope
 web site monitoring service
 
 ## Directory Structure

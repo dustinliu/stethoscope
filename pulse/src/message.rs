@@ -15,20 +15,9 @@ use reqwest::StatusCode;
 pub struct Endpoint {
     pub id: u32,
     pub url: String,
-    pub retry_delay: std::time::Duration,
+    pub retry_delay: tokio::time::Duration,
     pub retry_count: u8,
-    pub timeout: std::time::Duration,
-}
-
-/// Represents an endpoint with its monitoring configuration and results
-///
-/// # Fields
-/// * `request` - The endpoint configuration
-/// * `result` - Vector of results from each monitoring attempt
-#[derive(Debug, Clone)]
-pub struct EndpointStatus {
-    pub endpoint: Endpoint,
-    pub results: Vec<QueryResult>,
+    pub timeout: tokio::time::Duration,
 }
 
 /// Represents the result of a single endpoint monitoring attempt
@@ -42,5 +31,20 @@ pub struct QueryResult {
     pub endpoint: Endpoint,
     pub status: StatusCode,
     pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub duration: std::time::Duration,
+    pub duration: tokio::time::Duration,
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum EndpointState {
+    Processing,
+    Pending,
+}
+
+#[derive(Debug, Clone)]
+pub struct EndpointStatus {
+    pub endpoint: Endpoint,
+    pub results: Vec<QueryResult>,
+    pub state: EndpointState,
+}
+
+impl EndpointStatus {}

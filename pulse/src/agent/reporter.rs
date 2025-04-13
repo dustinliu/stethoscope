@@ -1,4 +1,4 @@
-use crate::{broker::Broker, runnable::Runnable};
+use crate::{broker::Broker, message::EndpointStatus, runnable::Runnable};
 use async_trait::async_trait;
 use log::trace;
 

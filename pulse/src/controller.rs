@@ -10,12 +10,12 @@ use tokio::{
     signal::unix::{SignalKind, signal},
     sync::watch,
     task::JoinHandle,
-    time::{Duration, timeout},
+    time::{Duration, MissedTickBehavior, timeout},
 };
 
 const MONITOR_INTERVAL_SECS: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT_SECS: Duration = Duration::from_secs(10);
-const TASK_SHUTDOWN_TIMEOUT_SECS: Duration = Duration::from_secs(1);
+const TASK_SHUTDOWN_TIMEOUT_SECS: Duration = Duration::from_secs(5);
 
 struct Task {
     name: String,
@@ -58,21 +58,21 @@ impl Controller {
     /// 2. Starts monitoring tasks to ensure agents and workers are running
     /// 3. Continuously receives and processes responses
     pub async fn start(&self) {
-        let report_handle = self.run_agent(self.config.reporter_num(), Reporter::new);
-        let worker_handle = self.run_agent(self.config.worker_num(), Worker::new);
-        let dispatcher_handle = self.run_agent(1, Dispatcher::new);
+        let report_handle = self.run_agent(self.config.reporter_num(), None, Reporter::new);
+        let worker_handle = self.run_agent(self.config.worker_num(), None, Worker::new);
+        let dispatcher_handle = self.run_agent(1, Some(MONITOR_INTERVAL_SECS), Dispatcher::new);
 
         // Wait for SIGINT or SIGTERM to initiate shutdown
         let mut sigint_stream = signal(SignalKind::interrupt()).expect("watch SIGINT failed");
         let mut sigterm_stream = signal(SignalKind::terminate()).expect("watch SIGTERM failed");
         tokio::select! {
             _ = sigint_stream.recv() => {
-                self.shutdown_tx.send(true).expect("failed to send shutdown signal");
                 info!("SIGINT received, shutdown initiated...");
+                self.shutdown_tx.send(true).expect("failed to send shutdown signal");
             }
             _ = sigterm_stream.recv() => {
-                self.shutdown_tx.send(true).expect("failed to send shutdown signal");
                 info!("SIGTERM received, shutdown initiated...");
+                self.shutdown_tx.send(true).expect("failed to send shutdown signal");
             }
         }
 
@@ -83,7 +83,12 @@ impl Controller {
         info!("All tasks shutdown complete");
     }
 
-    fn run_agent<T, F>(&self, num_tasks: usize, delay: Duration, task_factory: F) -> JoinHandle<()>
+    fn run_agent<T, F>(
+        &self,
+        num_tasks: usize,
+        delay: Option<Duration>,
+        task_factory: F,
+    ) -> JoinHandle<()>
     where
         T: Runnable + Send + Sync + 'static,
         F: Fn(usize, Broker) -> T,
@@ -99,13 +104,22 @@ impl Controller {
             let name = agent.name().to_string();
 
             let handle = tokio::spawn(async move {
+                let mut interval = delay.map(|d| {
+                    let mut interval = tokio::time::interval(d);
+                    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+                    interval
+                });
+
                 loop {
-                    tokio::time::sleep(delay).await;
                     tokio::select! {
                         _ = shutdown_rx.changed() => {
                             break;
                         }
-                        _ = agent.run() => {}
+                        _ = agent.run() => {
+                            if let Some(ref mut interval) = interval {
+                                interval.tick().await;
+                            }
+                        }
                     }
                 }
             });

@@ -9,6 +9,7 @@ mod controller;
 mod logger;
 mod message;
 mod runnable;
+mod waiting_pool;
 
 use controller::Controller;
 
