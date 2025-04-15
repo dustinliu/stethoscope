@@ -4,7 +4,7 @@
 /// 1. Processing URL monitoring requests by making HTTP requests
 /// 2. Handling various HTTP response scenarios (success, error, timeout)
 /// 3. Reporting results back to the controller
-use crate::{broker::Broker, message::QueryResult, runnable::Runnable};
+use crate::{agent::Runnable, broker::Broker, message::QueryResult};
 use async_trait::async_trait;
 use log::warn;
 

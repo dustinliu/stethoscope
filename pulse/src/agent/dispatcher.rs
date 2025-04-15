@@ -1,4 +1,4 @@
-use crate::{broker::Broker, message::Endpoint, runnable::Runnable};
+use crate::{agent::Runnable, broker::Broker, message::Endpoint};
 use async_trait::async_trait;
 use log::warn;
 use tokio::time;

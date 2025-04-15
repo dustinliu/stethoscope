@@ -1,36 +1,36 @@
-use crate::{broker::Broker, message::EndpointStatus, runnable::Runnable};
+use crate::{agent::Runnable, broker::Broker};
 use async_trait::async_trait;
 use log::trace;
 
-/// Prefix for reporter instance names
-const REPORTER_NAME_PREFIX: &str = "Reporter";
+/// Prefix for aggregator instance names
+const AGGREGATOR_NAME_PREFIX: &str = "Aggregator";
 
-/// Reporter responsible for processing monitoring results
+/// Aggregator responsible for processing monitoring results
 ///
-/// The Reporter component:
+/// The Aggregator component:
 /// - Receives results from workers
 /// - Processes results and handles retries
 /// - Manages the result processing lifecycle
 ///
 /// # Fields
-/// * `name` - Name of the reporter instance
+/// * `name` - Name of the aggregator instance
 /// * `result_receiver` - Channel for receiving results from workers
 /// * `shutdown_receiver` - Receiver for shutdown signals
-pub struct Reporter {
+pub struct Aggregator {
     name: String,
     broker: Broker,
 }
 
-impl Reporter {
-    /// Creates a new Reporter instance
+impl Aggregator {
+    /// Creates a new Aggregator instance
     ///
     /// # Arguments
-    /// * `id` - Unique identifier for this reporter
+    /// * `id` - Unique identifier for this aggregator
     /// * `result_receiver` - Channel for receiving results from workers
     /// * `shutdown_receiver` - Receiver for shutdown signals
     pub fn new(id: usize, broker: Broker) -> Self {
         Self {
-            name: format!("{}-{}", REPORTER_NAME_PREFIX, id),
+            name: format!("{}-{}", AGGREGATOR_NAME_PREFIX, id),
             broker,
         }
     }
@@ -48,12 +48,12 @@ impl Reporter {
 }
 
 #[async_trait]
-impl Runnable for Reporter {
+impl Runnable for Aggregator {
     async fn run(&self) {
         self.process_results().await;
     }
 
-    /// Returns the name of this reporter instance
+    /// Returns the name of this aggregator instance
     fn name(&self) -> &str {
         &self.name
     }

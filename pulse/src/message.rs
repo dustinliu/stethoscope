@@ -34,17 +34,8 @@ pub struct QueryResult {
     pub duration: tokio::time::Duration,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum EndpointState {
-    Processing,
-    Pending,
-}
-
 #[derive(Debug, Clone)]
-pub struct EndpointStatus {
+pub struct EndpointHistory {
     pub endpoint: Endpoint,
     pub results: Vec<QueryResult>,
-    pub state: EndpointState,
 }
-
-impl EndpointStatus {}

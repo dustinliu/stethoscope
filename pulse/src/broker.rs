@@ -1,4 +1,4 @@
-use crate::message::{Endpoint, EndpointStatus, QueryResult};
+use crate::message::{Endpoint, EndpointHistory, QueryResult};
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast, mpsc};
 
@@ -7,8 +7,8 @@ pub struct Broker {
     endpoint_rx: Arc<Mutex<mpsc::Receiver<Endpoint>>>,
     result_tx: mpsc::Sender<QueryResult>,
     result_rx: Arc<Mutex<mpsc::Receiver<QueryResult>>>,
-    status_tx: broadcast::Sender<EndpointStatus>,
-    status_rx: broadcast::Receiver<EndpointStatus>,
+    status_tx: broadcast::Sender<EndpointHistory>,
+    status_rx: broadcast::Receiver<EndpointHistory>,
 }
 
 impl Broker {
@@ -46,9 +46,9 @@ impl Broker {
 
     pub async fn send_status(
         &self,
-        status: EndpointStatus,
-    ) -> Result<usize, broadcast::error::SendError<EndpointStatus>> {
-        self.status_tx.send(status)
+        history: EndpointHistory,
+    ) -> Result<usize, broadcast::error::SendError<EndpointHistory>> {
+        self.status_tx.send(history)
     }
 
     pub async fn receive_endpoint(&self) -> Option<Endpoint> {
@@ -59,7 +59,7 @@ impl Broker {
         self.result_rx.lock().await.recv().await
     }
 
-    pub async fn receive_status(&mut self) -> Result<EndpointStatus, broadcast::error::RecvError> {
+    pub async fn receive_status(&mut self) -> Result<EndpointHistory, broadcast::error::RecvError> {
         self.status_rx.recv().await
     }
 }

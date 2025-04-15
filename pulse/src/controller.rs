@@ -1,8 +1,7 @@
 use crate::{
-    agent::{Dispatcher, Reporter, Worker},
+    agent::{Aggregator, Dispatcher, Runnable, Worker},
     broker::Broker,
     config::{self, Config},
-    runnable::Runnable,
 };
 use log::{debug, info, warn};
 use std::sync::Arc;
@@ -58,7 +57,7 @@ impl Controller {
     /// 2. Starts monitoring tasks to ensure agents and workers are running
     /// 3. Continuously receives and processes responses
     pub async fn start(&self) {
-        let report_handle = self.run_agent(self.config.reporter_num(), None, Reporter::new);
+        let aggregator_handle = self.run_agent(self.config.aggregator_num(), None, Aggregator::new);
         let worker_handle = self.run_agent(self.config.worker_num(), None, Worker::new);
         let dispatcher_handle = self.run_agent(1, Some(MONITOR_INTERVAL_SECS), Dispatcher::new);
 
@@ -78,7 +77,7 @@ impl Controller {
 
         Self::wait_for_shutdown(SHUTDOWN_TIMEOUT_SECS, "Dispatcher group", dispatcher_handle).await;
         Self::wait_for_shutdown(SHUTDOWN_TIMEOUT_SECS, "Worker group", worker_handle).await;
-        Self::wait_for_shutdown(SHUTDOWN_TIMEOUT_SECS, "Reporter group", report_handle).await;
+        Self::wait_for_shutdown(SHUTDOWN_TIMEOUT_SECS, "Aggregator group", aggregator_handle).await;
 
         info!("All tasks shutdown complete");
     }

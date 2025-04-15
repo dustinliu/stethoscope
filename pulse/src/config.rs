@@ -11,12 +11,12 @@ use std::{sync::OnceLock, time::Duration};
 ///
 /// # Fields
 /// * `worker_num` - Number of worker threads for processing URLs
-/// * `agent_num` - Number of agent threads for managing workers
+/// * `aggregator_num` - Number of agent threads for managing workers
 /// * `check_interval` - Duration between health checks
 #[derive(Debug)]
 pub struct Config {
     worker_num: usize,
-    reporter_num: usize,
+    aggregator_num: usize,
     check_interval: Duration,
 }
 
@@ -34,7 +34,7 @@ impl Config {
     fn new() -> Self {
         Config {
             worker_num: 2,
-            reporter_num: 1,
+            aggregator_num: 1,
             check_interval: Duration::from_secs(5),
         }
     }
@@ -44,9 +44,9 @@ impl Config {
         self.worker_num
     }
 
-    /// Returns the number of agent threads
-    pub fn reporter_num(&self) -> usize {
-        self.reporter_num
+    /// Returns the number of aggregator threads
+    pub fn aggregator_num(&self) -> usize {
+        self.aggregator_num
     }
 
     /// Returns the duration between health checks
