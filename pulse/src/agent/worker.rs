@@ -4,7 +4,11 @@
 /// 1. Processing URL monitoring requests by making HTTP requests
 /// 2. Handling various HTTP response scenarios (success, error, timeout)
 /// 3. Reporting results back to the controller
-use crate::{agent::Runnable, broker::Broker, message::QueryResult};
+use crate::runnable::Runnable;
+use crate::{
+    broker::Broker,
+    message::{QueryRecord, QueryResult},
+};
 use async_trait::async_trait;
 use log::warn;
 
@@ -67,38 +71,48 @@ impl Worker {
             {
                 Ok(response) => QueryResult {
                     endpoint,
-                    status: response.status(),
-                    timestamp,
-                    duration: start_time.elapsed(),
+                    record: QueryRecord {
+                        status: response.status(),
+                        timestamp,
+                        duration: start_time.elapsed(),
+                    },
                 },
                 Err(e) => {
                     if e.is_connect() {
                         QueryResult {
                             endpoint,
-                            status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
-                            timestamp,
-                            duration: start_time.elapsed(),
+                            record: QueryRecord {
+                                status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                                timestamp,
+                                duration: start_time.elapsed(),
+                            },
                         }
                     } else if e.is_timeout() {
                         QueryResult {
                             endpoint,
-                            status: reqwest::StatusCode::REQUEST_TIMEOUT,
-                            timestamp,
-                            duration: start_time.elapsed(),
+                            record: QueryRecord {
+                                status: reqwest::StatusCode::REQUEST_TIMEOUT,
+                                timestamp,
+                                duration: start_time.elapsed(),
+                            },
                         }
                     } else if e.is_status() {
                         QueryResult {
                             endpoint,
-                            status: e.status().unwrap(),
-                            timestamp,
-                            duration: start_time.elapsed(),
+                            record: QueryRecord {
+                                status: e.status().unwrap(),
+                                timestamp,
+                                duration: start_time.elapsed(),
+                            },
                         }
                     } else {
                         QueryResult {
                             endpoint,
-                            status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-                            timestamp,
-                            duration: start_time.elapsed(),
+                            record: QueryRecord {
+                                status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                                timestamp,
+                                duration: start_time.elapsed(),
+                            },
                         }
                     }
                 }
@@ -176,9 +190,8 @@ mod tests {
         let endpoint = Endpoint {
             id: 0,
             url: format!("http://{}", addr),
-            retry_delay: Duration::from_secs(1),
             timeout,
-            retry_count: 1,
+            failure_threshold: 3,
         };
 
         broker.send_endpoint(endpoint).await.unwrap();
@@ -196,8 +209,8 @@ mod tests {
         let result = run_worker_test(reqwest::StatusCode::OK, None, Duration::from_secs(5)).await;
 
         println!("Result: {:?}", result);
-        assert_eq!(result.status, reqwest::StatusCode::OK);
-        assert!(result.duration.as_secs_f64() > 0.0);
+        assert_eq!(result.record.status, reqwest::StatusCode::OK);
+        assert!(result.record.duration.as_secs_f64() > 0.0);
     }
 
     /// Tests the worker's handling of server errors
@@ -210,8 +223,11 @@ mod tests {
         )
         .await;
 
-        assert_eq!(result.status, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(result.duration.as_secs_f64() > 0.0);
+        assert_eq!(
+            result.record.status,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert!(result.record.duration.as_secs_f64() > 0.0);
     }
 
     #[tokio::test]
@@ -223,7 +239,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(result.status, reqwest::StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(result.record.status, reqwest::StatusCode::REQUEST_TIMEOUT);
     }
 
     #[tokio::test]
@@ -233,8 +249,7 @@ mod tests {
             id: 0,
             url: "http://jklfjkfjk".to_string(),
             timeout: Duration::from_secs(5),
-            retry_delay: Duration::from_secs(1),
-            retry_count: 3,
+            failure_threshold: 3,
         };
 
         let broker = Broker::new();
@@ -247,7 +262,10 @@ mod tests {
         broker.send_endpoint(endpoint).await.unwrap();
         let result = broker.receive_result().await.unwrap();
 
-        assert_eq!(result.status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
-        assert!(result.duration.as_secs_f64() > 0.0);
+        assert_eq!(
+            result.record.status,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(result.record.duration.as_secs_f64() > 0.0);
     }
 }

@@ -1,4 +1,5 @@
-use crate::{agent::Runnable, broker::Broker, message::Endpoint};
+use crate::runnable::Runnable;
+use crate::{broker::Broker, message::Endpoint};
 use async_trait::async_trait;
 use log::warn;
 use tokio::time;
@@ -52,8 +53,7 @@ impl Dispatcher {
                 id: i,
                 url: String::from("http://localhost"),
                 timeout: time::Duration::from_secs(5),
-                retry_delay: time::Duration::from_secs(5),
-                retry_count: 3,
+                failure_threshold: 3,
             })
             .collect()
     }

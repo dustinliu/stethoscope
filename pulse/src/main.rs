@@ -8,7 +8,8 @@ mod config;
 mod controller;
 mod logger;
 mod message;
-// mod runnable;
+// mod reporter;
+mod runnable;
 
 use controller::Controller;
 

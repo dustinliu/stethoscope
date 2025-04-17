@@ -2,7 +2,8 @@
 ///
 /// This module manages the global configuration settings for the application,
 /// including worker counts, agent counts, and timing intervals.
-use std::{sync::OnceLock, time::Duration};
+use std::sync::OnceLock;
+use tokio::time::Duration;
 
 /// Global configuration settings for the application
 ///
@@ -35,7 +36,7 @@ impl Config {
         Config {
             worker_num: 2,
             aggregator_num: 1,
-            check_interval: Duration::from_secs(5),
+            check_interval: Duration::from_secs(1),
         }
     }
 
@@ -52,8 +53,8 @@ impl Config {
     /// Returns the duration between health checks
     ///
     /// TODO: Change the default value to 5 minutes
-    pub fn check_interval(&self) -> &Duration {
-        &self.check_interval
+    pub fn check_interval(&self) -> Duration {
+        self.check_interval
     }
 }
 

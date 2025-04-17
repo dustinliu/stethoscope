@@ -1,7 +1,8 @@
 use crate::{
-    agent::{Aggregator, Dispatcher, Runnable, Worker},
+    agent::{Aggregator, Dispatcher, StdIO, Worker},
     broker::Broker,
     config::{self, Config},
+    runnable::Runnable,
 };
 use log::{debug, info, warn};
 use std::sync::Arc;
@@ -12,7 +13,6 @@ use tokio::{
     time::{Duration, MissedTickBehavior, timeout},
 };
 
-const MONITOR_INTERVAL_SECS: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT_SECS: Duration = Duration::from_secs(10);
 const TASK_SHUTDOWN_TIMEOUT_SECS: Duration = Duration::from_secs(5);
 
@@ -57,9 +57,11 @@ impl Controller {
     /// 2. Starts monitoring tasks to ensure agents and workers are running
     /// 3. Continuously receives and processes responses
     pub async fn start(&self) {
+        let stdio_handle = self.run_agent(1, None, StdIO::new);
         let aggregator_handle = self.run_agent(self.config.aggregator_num(), None, Aggregator::new);
         let worker_handle = self.run_agent(self.config.worker_num(), None, Worker::new);
-        let dispatcher_handle = self.run_agent(1, Some(MONITOR_INTERVAL_SECS), Dispatcher::new);
+        let dispatcher_handle =
+            self.run_agent(1, Some(self.config.check_interval()), Dispatcher::new);
 
         // Wait for SIGINT or SIGTERM to initiate shutdown
         let mut sigint_stream = signal(SignalKind::interrupt()).expect("watch SIGINT failed");
@@ -75,6 +77,7 @@ impl Controller {
             }
         }
 
+        Self::wait_for_shutdown(SHUTDOWN_TIMEOUT_SECS, "StdIO Reporter", stdio_handle).await;
         Self::wait_for_shutdown(SHUTDOWN_TIMEOUT_SECS, "Dispatcher group", dispatcher_handle).await;
         Self::wait_for_shutdown(SHUTDOWN_TIMEOUT_SECS, "Worker group", worker_handle).await;
         Self::wait_for_shutdown(SHUTDOWN_TIMEOUT_SECS, "Aggregator group", aggregator_handle).await;

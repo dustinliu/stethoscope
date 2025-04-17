@@ -1,9 +1,9 @@
 pub mod aggregator;
 pub mod dispatcher;
-pub mod runnable;
+pub mod reporter;
 pub mod worker;
 
 pub use aggregator::Aggregator;
 pub use dispatcher::Dispatcher;
-pub use runnable::Runnable;
+pub use reporter::stdio::StdIO;
 pub use worker::Worker;
