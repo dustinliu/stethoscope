@@ -44,7 +44,11 @@ impl Worker {
         Self {
             name: format!("{}-{}", WORKER_NAME_PREFIX, id),
             broker,
-            client: reqwest::Client::new(),
+            client: reqwest::ClientBuilder::new()
+                .pool_max_idle_per_host(0) // Disable keeping idle connections
+                .pool_idle_timeout(std::time::Duration::from_secs(0)) // Set idle timeout to 0
+                .build()
+                .expect("Failed to build reqwest client"),
         }
     }
 
@@ -66,6 +70,7 @@ impl Worker {
                 .client
                 .get(&endpoint.url)
                 .timeout(endpoint.timeout)
+                .header(reqwest::header::CONNECTION, "close")
                 .send()
                 .await
             {
