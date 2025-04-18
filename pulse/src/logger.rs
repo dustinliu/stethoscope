@@ -5,6 +5,8 @@
 use env_logger::Builder;
 use log::LevelFilter;
 
+use crate::config;
+
 /// Initializes the logging system with appropriate configuration
 ///
 /// This function:
@@ -12,10 +14,15 @@ use log::LevelFilter;
 /// 2. Parses environment variables for additional configuration
 /// 3. Initializes the logger with error handling
 pub fn init_logger() {
-    println!("Initializing logger");
+    let level = if config::instance().debug {
+        LevelFilter::Debug
+    } else {
+        LevelFilter::Info
+    };
+
     let mut builder = Builder::new();
     builder
-        .filter_module("pulse", LevelFilter::Debug)
+        .filter_module("pulse", level)
         .parse_default_env()
         .try_init()
         .expect("Failed to initialize logger");

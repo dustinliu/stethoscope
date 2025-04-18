@@ -1,0 +1,8 @@
+debug = true
+
+[dispatcher]
+check_interval = "2s"
+
+[reporter]
+enable_stdio = true
+alert_buffer_len = 10

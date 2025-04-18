@@ -63,7 +63,7 @@ impl Controller {
         });
         tasks.push(TaskHandle {
             name: "Worker Group".to_string(),
-            handle: self.run_agent(self.config.worker_num(), Worker::new),
+            handle: self.run_agent(self.config.worker.num_instance, Worker::new),
         });
         tasks.push(TaskHandle {
             name: "Dispatcher Group".to_string(),
@@ -85,7 +85,9 @@ impl Controller {
         }
 
         for task in tasks.into_iter().rev() {
+            info!("waiting for {} shutdown", task.name);
             Self::wait_for_shutdown(SHUTDOWN_TIMEOUT_SECS, &task.name, task.handle).await;
+            info!("{} shutdown complete", task.name);
         }
 
         info!("All tasks shutdown complete");

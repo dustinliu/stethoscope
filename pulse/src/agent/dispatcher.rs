@@ -68,7 +68,7 @@ impl Dispatcher {
     /// 2. Generates and sends URLs at each interval
     /// 3. Monitors for shutdown signals
     async fn dispatch_urls(&self) {
-        let mut interval = interval(self.config.check_interval());
+        let mut interval = interval(self.config.dispatcher.check_interval);
         interval.tick().await;
         for url in Self::gen_urls() {
             if let Err(e) = self.broker.send_endpoint(url).await {
