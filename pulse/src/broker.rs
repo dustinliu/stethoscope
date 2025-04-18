@@ -1,6 +1,7 @@
 use crate::message::{Endpoint, EndpointHistory, QueryResult};
+use log::error;
 use std::sync::Arc;
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc, watch};
 
 pub struct Broker {
     endpoint_tx: mpsc::Sender<Endpoint>,
@@ -9,6 +10,9 @@ pub struct Broker {
     result_rx: Arc<Mutex<mpsc::Receiver<QueryResult>>>,
     report: broadcast::Sender<EndpointHistory>,
     report_rx: broadcast::Receiver<EndpointHistory>,
+
+    shutdown_tx: watch::Sender<bool>,
+    shutdown_rx: watch::Receiver<bool>,
 }
 
 impl Broker {
@@ -20,6 +24,8 @@ impl Broker {
         let endpoint_rx = Arc::new(Mutex::new(endpoint_rx));
         let result_rx = Arc::new(Mutex::new(result_rx));
 
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
         Self {
             endpoint_tx,
             endpoint_rx,
@@ -27,6 +33,8 @@ impl Broker {
             result_rx,
             report: report_tx,
             report_rx,
+            shutdown_tx,
+            shutdown_rx,
         }
     }
 
@@ -62,6 +70,28 @@ impl Broker {
     pub async fn receive_report(&mut self) -> Result<EndpointHistory, broadcast::error::RecvError> {
         self.report_rx.recv().await
     }
+
+    pub fn shutdown(&self) {
+        self.shutdown_tx
+            .send(true)
+            .expect("failed to send shutdown signal");
+    }
+
+    pub async fn wait_for_shutdown(&mut self) {
+        self.shutdown_rx
+            .changed()
+            .await
+            .expect("failed to wait for shutdown signal");
+    }
+
+    pub fn is_shutdown(&self) -> bool {
+        if let Ok(changed) = self.shutdown_rx.has_changed() {
+            changed
+        } else {
+            error!("failed to check if shutdown signal has changed, shutting down");
+            true
+        }
+    }
 }
 
 impl Clone for Broker {
@@ -73,6 +103,8 @@ impl Clone for Broker {
             result_rx: self.result_rx.clone(),
             report: self.report.clone(),
             report_rx: self.report.subscribe(),
+            shutdown_tx: self.shutdown_tx.clone(),
+            shutdown_rx: self.shutdown_tx.subscribe(),
         }
     }
 }

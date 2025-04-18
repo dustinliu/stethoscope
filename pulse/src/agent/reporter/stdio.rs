@@ -23,9 +23,31 @@ impl StdIO {
 #[async_trait]
 impl Runnable for StdIO {
     async fn run(&self) {
-        let report = self.broker.lock().await.receive_report().await;
-        if let Ok(report) = report {
-            println!("{}", report);
+        loop {
+            // Lock broker to check shutdown status
+            {
+                let broker_guard = self.broker.lock().await;
+                if broker_guard.is_shutdown() {
+                    break;
+                }
+                // broker_guard dropped here
+            }
+
+            // Now receive_report without holding the lock
+            // Lock again just for receive_report
+            let report_result = {
+                let mut broker_guard = self.broker.lock().await;
+                broker_guard.receive_report().await
+            };
+
+            match report_result {
+                Ok(report) => {
+                    println!("{}", report);
+                }
+                Err(_) => {
+                    break;
+                }
+            }
         }
     }
 

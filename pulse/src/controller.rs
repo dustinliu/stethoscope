@@ -5,21 +5,18 @@ use crate::{
     runnable::Runnable,
 };
 use log::{debug, info, warn};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::{
     signal::unix::{SignalKind, signal},
-    sync::watch,
     task::JoinHandle,
-    time::{Duration, MissedTickBehavior, timeout},
+    time::timeout,
 };
 
 const SHUTDOWN_TIMEOUT_SECS: Duration = Duration::from_secs(10);
-const TASK_SHUTDOWN_TIMEOUT_SECS: Duration = Duration::from_secs(5);
+const TASK_SHUTDOWN_TIMEOUT_SECS: Duration = Duration::from_secs(3);
+const AGGREGATOR_NUM: usize = 1;
+const DISPATCHER_NUM: usize = 1;
 
-struct Task {
-    name: String,
-    handle: JoinHandle<()>,
-}
 /// Controller that manages the URL monitoring system
 ///
 /// Coordinates between agents and workers by:
@@ -30,8 +27,6 @@ struct Task {
 /// # Fields
 /// * `shutdown_sender` - Channel for sending shutdown signals to all tasks
 pub struct Controller {
-    shutdown_tx: watch::Sender<bool>,
-    shutdown_rx: watch::Receiver<bool>,
     broker: Broker,
     config: &'static Config,
 }
@@ -41,10 +36,7 @@ impl Controller {
     ///
     /// Initializes channels with a buffer size of 100 for both request and response channels
     pub fn new() -> Self {
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
         Self {
-            shutdown_tx,
-            shutdown_rx,
             broker: Broker::new(),
             config: config::instance(),
         }
@@ -57,11 +49,28 @@ impl Controller {
     /// 2. Starts monitoring tasks to ensure agents and workers are running
     /// 3. Continuously receives and processes responses
     pub async fn start(&self) {
-        let stdio_handle = self.run_agent(1, None, StdIO::new);
-        let aggregator_handle = self.run_agent(self.config.aggregator_num(), None, Aggregator::new);
-        let worker_handle = self.run_agent(self.config.worker_num(), None, Worker::new);
-        let dispatcher_handle =
-            self.run_agent(1, Some(self.config.check_interval()), Dispatcher::new);
+        let mut tasks = Vec::new();
+
+        if self.config.enable_stdio_reporter() {
+            let stdio_handle = self.run_agent(1, StdIO::new);
+            tasks.push(TaskHandle {
+                name: "StdIO Reporter Group".to_string(),
+                handle: stdio_handle,
+            });
+        }
+
+        tasks.push(TaskHandle {
+            name: "Aggregator Group".to_string(),
+            handle: self.run_agent(AGGREGATOR_NUM, Aggregator::new),
+        });
+        tasks.push(TaskHandle {
+            name: "Worker Group".to_string(),
+            handle: self.run_agent(self.config.worker_num(), Worker::new),
+        });
+        tasks.push(TaskHandle {
+            name: "Dispatcher Group".to_string(),
+            handle: self.run_agent(DISPATCHER_NUM, Dispatcher::new),
+        });
 
         // Wait for SIGINT or SIGTERM to initiate shutdown
         let mut sigint_stream = signal(SignalKind::interrupt()).expect("watch SIGINT failed");
@@ -69,28 +78,22 @@ impl Controller {
         tokio::select! {
             _ = sigint_stream.recv() => {
                 info!("SIGINT received, shutdown initiated...");
-                self.shutdown_tx.send(true).expect("failed to send shutdown signal");
+                self.broker.shutdown();
             }
             _ = sigterm_stream.recv() => {
                 info!("SIGTERM received, shutdown initiated...");
-                self.shutdown_tx.send(true).expect("failed to send shutdown signal");
+                self.broker.shutdown();
             }
         }
 
-        Self::wait_for_shutdown(SHUTDOWN_TIMEOUT_SECS, "StdIO Reporter", stdio_handle).await;
-        Self::wait_for_shutdown(SHUTDOWN_TIMEOUT_SECS, "Dispatcher group", dispatcher_handle).await;
-        Self::wait_for_shutdown(SHUTDOWN_TIMEOUT_SECS, "Worker group", worker_handle).await;
-        Self::wait_for_shutdown(SHUTDOWN_TIMEOUT_SECS, "Aggregator group", aggregator_handle).await;
+        for task in tasks.into_iter().rev() {
+            Self::wait_for_shutdown(SHUTDOWN_TIMEOUT_SECS, &task.name, task.handle).await;
+        }
 
         info!("All tasks shutdown complete");
     }
 
-    fn run_agent<T, F>(
-        &self,
-        num_tasks: usize,
-        delay: Option<Duration>,
-        task_factory: F,
-    ) -> JoinHandle<()>
+    fn run_agent<T, F>(&self, num_tasks: usize, task_factory: F) -> JoinHandle<()>
     where
         T: Runnable + Send + Sync + 'static,
         F: Fn(usize, Broker) -> T,
@@ -99,47 +102,21 @@ impl Controller {
             .map(|i| Arc::new(task_factory(i, self.broker.clone())))
             .collect::<Vec<_>>();
 
-        let mut tasks = Vec::with_capacity(num_tasks);
+        let mut handles = Vec::with_capacity(num_tasks);
 
-        for agent in agents {
-            let mut shutdown_rx = self.shutdown_rx.clone();
-            let name = agent.name().to_string();
-
+        for agent in &agents {
+            let agent = agent.clone();
             let handle = tokio::spawn(async move {
-                let mut interval = delay.map(|d| {
-                    let mut interval = tokio::time::interval(d);
-                    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-                    interval
-                });
-
-                loop {
-                    tokio::select! {
-                        _ = shutdown_rx.changed() => {
-                            break;
-                        }
-                        _ = agent.run() => {
-                            if let Some(ref mut interval) = interval {
-                                interval.tick().await;
-                            }
-                        }
-                    }
-                }
+                agent.run().await;
             });
-
-            tasks.push(Task {
-                name: name.to_string(),
-                handle,
-            });
+            handles.push(handle);
         }
 
-        let mut shutdown_rx = self.shutdown_rx.clone();
+        let mut broker = self.broker.clone();
         tokio::spawn(async move {
-            shutdown_rx
-                .changed()
-                .await
-                .expect("failed to receive shutdown signal");
-            for task in tasks {
-                Self::wait_for_shutdown(TASK_SHUTDOWN_TIMEOUT_SECS, &task.name, task.handle).await;
+            broker.wait_for_shutdown().await;
+            for (i, handle) in handles.into_iter().enumerate() {
+                Self::wait_for_shutdown(TASK_SHUTDOWN_TIMEOUT_SECS, agents[i].name(), handle).await;
             }
         })
     }
@@ -167,4 +144,9 @@ impl Controller {
             }
         }
     }
+}
+
+struct TaskHandle {
+    name: String,
+    handle: JoinHandle<()>,
 }

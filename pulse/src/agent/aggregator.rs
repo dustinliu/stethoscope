@@ -1,5 +1,5 @@
 use crate::broker::Broker;
-use crate::message::EndpointHistory;
+use crate::message::{EndpointHistory, QueryResult};
 use crate::runnable::Runnable;
 use async_trait::async_trait;
 use log::trace;
@@ -46,28 +46,26 @@ impl Aggregator {
     /// This method:
     /// 1. Receives results from the worker channel
     /// 2. Processes each result and logs the outcome
-    async fn process_results(&self) {
-        if let Some(result) = self.broker.receive_result().await {
-            // release the lock as soon as possible
-            let mut pool = self.pool.lock().await;
-            let history = pool.entry(result.endpoint.id).or_insert(EndpointHistory {
-                endpoint: result.endpoint.clone(),
-                events: Vec::new(),
-            });
+    async fn process_results(&self, result: QueryResult) {
+        // release the lock as soon as possible
+        let mut pool = self.pool.lock().await;
+        let history = pool.entry(result.endpoint.id).or_insert(EndpointHistory {
+            endpoint: result.endpoint.clone(),
+            events: Vec::new(),
+        });
 
-            if result.record.status.is_success() {
-                history.events.clear();
-                return;
-            }
+        if result.record.status.is_success() {
+            history.events.clear();
+            return;
+        }
 
-            // Update endpoint information as it might have changed
-            history.endpoint = result.endpoint;
-            trace!("{:?}", history);
-            history.events.push(result.record);
+        // Update endpoint information as it might have changed
+        history.endpoint = result.endpoint;
+        trace!("{:?}", history);
+        history.events.push(result.record);
 
-            if let Some(report) = self.collect_recent_failure(history) {
-                let _ = self.broker.send_report(report).await;
-            }
+        if let Some(report) = self.collect_recent_failure(history) {
+            let _ = self.broker.send_report(report).await;
         }
     }
 
@@ -95,7 +93,13 @@ impl Aggregator {
 #[async_trait]
 impl Runnable for Aggregator {
     async fn run(&self) {
-        self.process_results().await;
+        while let Some(result) = self.broker.receive_result().await {
+            self.process_results(result).await;
+
+            if self.broker.is_shutdown() {
+                break;
+            }
+        }
     }
 
     /// Returns the name of this aggregator instance
@@ -231,7 +235,7 @@ mod tests {
     async fn test_failure_event_being_inserted() {
         let endpoint = make_endpoint(3);
         let now = Utc::now();
-        let events = vec![
+        let events = [
             make_event(&endpoint, StatusCode::INTERNAL_SERVER_ERROR, now),
             make_event(&endpoint, StatusCode::INTERNAL_SERVER_ERROR, now),
             make_event(&endpoint, StatusCode::INTERNAL_SERVER_ERROR, now),
@@ -241,8 +245,7 @@ mod tests {
         let aggregator = Aggregator::new(0, broker.clone());
 
         for event in events {
-            let _ = broker.send_result(event).await;
-            aggregator.process_results().await;
+            let _ = aggregator.process_results(event).await;
         }
 
         assert_eq!(aggregator.pool.lock().await.len(), 1);
@@ -272,8 +275,7 @@ mod tests {
         let aggregator = Aggregator::new(0, broker.clone());
 
         for event in events {
-            let _ = broker.send_result(event).await;
-            aggregator.process_results().await;
+            let _ = aggregator.process_results(event).await;
         }
 
         assert_eq!(aggregator.pool.lock().await.len(), 1);
@@ -371,11 +373,8 @@ mod tests {
         let broker = Broker::new();
         let aggregator = Aggregator::new(0, broker.clone());
 
-        // 發送初始事件
-        let _ = broker.send_result(initial_event).await;
-        aggregator.process_results().await;
+        aggregator.process_results(initial_event).await;
 
-        // 確認 pool 中的 endpoint 是初始版本
         {
             let pool = aggregator.pool.lock().await;
             let history = pool.get(&initial_endpoint.id).unwrap();
@@ -384,11 +383,8 @@ mod tests {
             assert_eq!(history.endpoint.timeout, initial_endpoint.timeout);
         }
 
-        // 發送更新後的事件
-        let _ = broker.send_result(updated_event).await;
-        aggregator.process_results().await;
+        aggregator.process_results(updated_event).await;
 
-        // 確認 pool 中的 endpoint 已更新
         {
             let pool = aggregator.pool.lock().await;
             let history = pool.get(&initial_endpoint.id).unwrap();

@@ -1,8 +1,9 @@
+use crate::config::{self, Config};
 use crate::runnable::Runnable;
 use crate::{broker::Broker, message::Endpoint};
 use async_trait::async_trait;
-use log::warn;
-use tokio::time;
+use log::{debug, warn};
+use tokio::time::{Duration, interval};
 
 /// Prefix for dispatcher instance names
 const DISPATCHER_NAME_PREFIX: &str = "Dispatcher";
@@ -21,6 +22,7 @@ const DISPATCHER_NAME_PREFIX: &str = "Dispatcher";
 pub struct Dispatcher {
     name: String,
     broker: Broker,
+    config: &'static Config,
 }
 
 impl Dispatcher {
@@ -37,6 +39,7 @@ impl Dispatcher {
         Self {
             name: format!("{}-{}", DISPATCHER_NAME_PREFIX, id),
             broker,
+            config: config::instance(),
         }
     }
 
@@ -52,7 +55,7 @@ impl Dispatcher {
             .map(|i| Endpoint {
                 id: i,
                 url: String::from("http://localhost"),
-                timeout: time::Duration::from_secs(5),
+                timeout: Duration::from_secs(5),
                 failure_threshold: 3,
             })
             .collect()
@@ -65,6 +68,8 @@ impl Dispatcher {
     /// 2. Generates and sends URLs at each interval
     /// 3. Monitors for shutdown signals
     async fn dispatch_urls(&self) {
+        let mut interval = interval(self.config.check_interval());
+        interval.tick().await;
         for url in Self::gen_urls() {
             if let Err(e) = self.broker.send_endpoint(url).await {
                 warn!("Failed to send URL: {}", e);
@@ -75,9 +80,16 @@ impl Dispatcher {
 
 #[async_trait]
 impl Runnable for Dispatcher {
-    /// Starts the dispatcher's URL generation and distribution process
     async fn run(&self) {
-        self.dispatch_urls().await;
+        let mut broker = self.broker.clone();
+        loop {
+            tokio::select! {
+                _ = broker.wait_for_shutdown() => {
+                    break;
+                }
+                _ = self.dispatch_urls() => {}
+            }
+        }
     }
 
     /// Returns the name of this dispatcher instance

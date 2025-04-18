@@ -56,6 +56,10 @@ impl Config {
     pub fn check_interval(&self) -> Duration {
         self.check_interval
     }
+
+    pub fn enable_stdio_reporter(&self) -> bool {
+        false
+    }
 }
 
 /// Returns the global singleton instance of Config

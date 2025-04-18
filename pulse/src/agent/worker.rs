@@ -62,7 +62,7 @@ impl Worker {
     /// # Arguments
     /// * `endpoint` - The endpoint to process
     async fn process_endpoint(&self) {
-        if let Some(endpoint) = self.broker.receive_endpoint().await {
+        while let Some(endpoint) = self.broker.receive_endpoint().await {
             let timestamp = chrono::Utc::now();
             let start_time = tokio::time::Instant::now();
 
@@ -125,6 +125,10 @@ impl Worker {
 
             if let Err(e) = self.broker.send_result(result).await {
                 warn!("Failed to send result: {}", e);
+            }
+
+            if self.broker.is_shutdown() {
+                break;
             }
         }
     }
@@ -260,12 +264,14 @@ mod tests {
         let broker = Broker::new();
         let worker = Worker::new(0, broker.clone());
 
-        tokio::spawn(async move {
+        let worker_handle = tokio::spawn(async move {
             worker.run().await;
         });
 
         broker.send_endpoint(endpoint).await.unwrap();
         let result = broker.receive_result().await.unwrap();
+
+        worker_handle.abort();
 
         assert_eq!(
             result.record.status,
