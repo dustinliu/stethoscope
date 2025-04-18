@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use super::report_executor::{Executor, StdIO};
-use crate::{broker::Broker, config, runnable::Runnable};
+use crate::{broker::Broker, config, message::EndpointHistory, runnable::Runnable};
 use async_trait::async_trait;
+use tokio::task::JoinHandle;
 
 pub struct Reporter {
     name: String,
@@ -26,18 +27,24 @@ impl Reporter {
     }
 }
 
+impl Reporter {
+    async fn report(&self, report: EndpointHistory) -> Vec<JoinHandle<()>> {
+        let mut handles = vec![];
+
+        for executor in self.executors.iter().flatten() {
+            let e = executor.clone();
+            let r = report.clone();
+            handles.push(tokio::spawn(async move { e.report(r.clone()).await }));
+        }
+        handles
+    }
+}
+
 #[async_trait]
 impl Runnable for Reporter {
     async fn run(&mut self) {
         while let Some(report) = self.broker.receive_report().await {
-            let mut handles = vec![];
-
-            for executor in self.executors.iter().flatten() {
-                let e = executor.clone();
-                let r = report.clone();
-                handles.push(tokio::spawn(async move { e.report(r.clone()).await }));
-            }
-
+            let handles = self.report(report).await;
             for handle in handles {
                 handle.await.unwrap();
             }

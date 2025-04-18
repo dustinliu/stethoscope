@@ -17,6 +17,14 @@ const TASK_SHUTDOWN_TIMEOUT_SECS: Duration = Duration::from_secs(3);
 const AGGREGATOR_NUM: usize = 1;
 const DISPATCHER_NUM: usize = 1;
 
+macro_rules! add_task_group {
+    ($tasks:expr, $self:expr, $name:expr, $num:expr, $agent_type:expr) => {
+        $tasks.push(TaskHandle {
+            name: format!("{} Group", $name),
+            handle: $self.run_agent($num, $agent_type),
+        });
+    };
+}
 /// Controller that manages the URL monitoring system
 ///
 /// Coordinates between agents and workers by:
@@ -50,25 +58,10 @@ impl Controller {
     /// 3. Continuously receives and processes responses
     pub async fn start(&self) {
         let mut tasks = Vec::new();
-
-        let reporter_handle = self.run_agent(1, Reporter::new);
-        tasks.push(TaskHandle {
-            name: "Reporter Group".to_string(),
-            handle: reporter_handle,
-        });
-
-        tasks.push(TaskHandle {
-            name: "Aggregator Group".to_string(),
-            handle: self.run_agent(AGGREGATOR_NUM, Aggregator::new),
-        });
-        tasks.push(TaskHandle {
-            name: "Worker Group".to_string(),
-            handle: self.run_agent(self.config.worker.num_instance, Worker::new),
-        });
-        tasks.push(TaskHandle {
-            name: "Dispatcher Group".to_string(),
-            handle: self.run_agent(DISPATCHER_NUM, Dispatcher::new),
-        });
+        add_task_group!(tasks, self, "Reporter", 1, Reporter::new);
+        add_task_group!(tasks, self, "Aggregator", AGGREGATOR_NUM, Aggregator::new);
+        add_task_group!(tasks, self, "Worker", self.config.worker.num_instance, Worker::new);
+        add_task_group!(tasks, self, "Dispatcher", DISPATCHER_NUM, Dispatcher::new);
 
         // Wait for SIGINT or SIGTERM to initiate shutdown
         let mut sigint_stream = signal(SignalKind::interrupt()).expect("watch SIGINT failed");
@@ -99,12 +92,7 @@ impl Controller {
         F: Fn(usize, Broker) -> T,
     {
         let agents = (0..num_tasks)
-            .map(|i| {
-                Arc::new(tokio::sync::Mutex::new(task_factory(
-                    i,
-                    self.broker.clone(),
-                )))
-            })
+            .map(|i| Arc::new(tokio::sync::Mutex::new(task_factory(i, self.broker.clone()))))
             .collect::<Vec<_>>();
 
         let mut handles = Vec::with_capacity(num_tasks);
@@ -147,11 +135,7 @@ impl Controller {
                 }
             }
             Err(_) => {
-                warn!(
-                    "{} shutdown timed out after {} seconds",
-                    task_name,
-                    wait_timeout.as_secs()
-                );
+                warn!("{} shutdown timed out after {} seconds", task_name, wait_timeout.as_secs());
             }
         }
     }

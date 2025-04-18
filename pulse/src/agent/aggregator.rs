@@ -1,8 +1,7 @@
 use crate::broker::Broker;
-use crate::message::{EndpointHistory, QueryResult};
+use crate::message::{EndpointHistory, QueryRecord, QueryResult};
 use crate::runnable::Runnable;
 use async_trait::async_trait;
-use log::trace;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
 
@@ -42,7 +41,7 @@ impl Aggregator {
     }
 
     /// Helper: retain only the most recent `threshold` events
-    fn retain_recent_events(events: &mut Vec<crate::message::QueryRecord>, threshold: usize) {
+    fn retain_recent_events(events: &mut Vec<QueryRecord>, threshold: usize) {
         if events.len() > threshold {
             let drain_count = events.len() - threshold;
             events.drain(0..drain_count);
@@ -69,7 +68,7 @@ impl Aggregator {
         // Update endpoint information as it might have changed
         history.endpoint = result.endpoint;
         history.events.push(result.record);
-        trace!("{:?}", history);
+        log::trace!("{:?}", history);
 
         let threshold = history.endpoint.failure_threshold as usize;
         Self::retain_recent_events(&mut history.events, threshold);
