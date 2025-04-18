@@ -50,6 +50,10 @@ impl Config {
         self.check_interval
     }
 
+    pub fn alert_buffer_len(&self) -> usize {
+        100
+    }
+
     pub fn enable_stdio_reporter(&self) -> bool {
         false
     }

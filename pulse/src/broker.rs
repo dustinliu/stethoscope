@@ -1,4 +1,7 @@
-use crate::message::{Endpoint, EndpointHistory, QueryResult};
+use crate::{
+    config,
+    message::{Endpoint, EndpointHistory, QueryResult},
+};
 use log::error;
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast, mpsc, watch};
@@ -17,9 +20,10 @@ pub struct Broker {
 
 impl Broker {
     pub fn new() -> Self {
+        let config = config::instance();
         let (endpoint_tx, endpoint_rx) = mpsc::channel(100);
         let (result_tx, result_rx) = mpsc::channel(100);
-        let (report_tx, report_rx) = broadcast::channel(100);
+        let (report_tx, report_rx) = broadcast::channel(config.alert_buffer_len());
 
         let endpoint_rx = Arc::new(Mutex::new(endpoint_rx));
         let result_rx = Arc::new(Mutex::new(result_rx));

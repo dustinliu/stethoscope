@@ -1,6 +1,8 @@
 use super::report_executor::{Executor, StdIO};
 use crate::{broker::Broker, config, runnable::Runnable};
 use async_trait::async_trait;
+use log::{error, warn};
+use tokio::sync::broadcast;
 
 // stdio reporter module
 
@@ -29,9 +31,20 @@ impl Reporter {
 #[async_trait]
 impl Runnable for Reporter {
     async fn run(&mut self) {
-        while let Ok(report) = self.broker.receive_report().await {
-            for executor in self.executors.iter().flatten() {
-                executor.report(report.clone()).await;
+        loop {
+            match self.broker.receive_report().await {
+                Ok(report) => {
+                    for executor in self.executors.iter().flatten() {
+                        executor.report(report.clone()).await;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("alert buffer is lagged by {} messages", n);
+                }
+                Err(e) => {
+                    error!("failed to receive report: {}", e);
+                    break;
+                }
             }
 
             if self.broker.is_shutdown() {
