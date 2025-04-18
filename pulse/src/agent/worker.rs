@@ -137,7 +137,7 @@ impl Worker {
 #[async_trait]
 impl Runnable for Worker {
     /// Starts the worker's endpoint processing loop
-    async fn run(&self) {
+    async fn run(&mut self) {
         self.process_endpoint().await;
     }
 
@@ -190,7 +190,7 @@ mod tests {
         server.expect(expectation);
 
         let broker = Broker::new();
-        let worker = Worker::new(0, broker.clone());
+        let mut worker = Worker::new(0, broker.clone());
 
         let worker_handle = tokio::spawn(async move {
             worker.run().await;
@@ -262,7 +262,7 @@ mod tests {
         };
 
         let broker = Broker::new();
-        let worker = Worker::new(0, broker.clone());
+        let mut worker = Worker::new(0, broker.clone());
 
         let worker_handle = tokio::spawn(async move {
             worker.run().await;

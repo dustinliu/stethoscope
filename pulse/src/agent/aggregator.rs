@@ -92,7 +92,7 @@ impl Aggregator {
 
 #[async_trait]
 impl Runnable for Aggregator {
-    async fn run(&self) {
+    async fn run(&mut self) {
         while let Some(result) = self.broker.receive_result().await {
             self.process_results(result).await;
 

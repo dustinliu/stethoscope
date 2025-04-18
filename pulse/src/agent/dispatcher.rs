@@ -2,7 +2,7 @@ use crate::config::{self, Config};
 use crate::runnable::Runnable;
 use crate::{broker::Broker, message::Endpoint};
 use async_trait::async_trait;
-use log::{debug, warn};
+use log::warn;
 use tokio::time::{Duration, interval};
 
 /// Prefix for dispatcher instance names
@@ -80,7 +80,7 @@ impl Dispatcher {
 
 #[async_trait]
 impl Runnable for Dispatcher {
-    async fn run(&self) {
+    async fn run(&mut self) {
         let mut broker = self.broker.clone();
         loop {
             tokio::select! {

@@ -17,7 +17,6 @@ use tokio::time::Duration;
 #[derive(Debug)]
 pub struct Config {
     worker_num: usize,
-    aggregator_num: usize,
     check_interval: Duration,
 }
 
@@ -34,8 +33,7 @@ impl Config {
     /// * 5 second check interval
     fn new() -> Self {
         Config {
-            worker_num: 2,
-            aggregator_num: 1,
+            worker_num: 20,
             check_interval: Duration::from_secs(1),
         }
     }
@@ -43,11 +41,6 @@ impl Config {
     /// Returns the number of worker threads
     pub fn worker_num(&self) -> usize {
         self.worker_num
-    }
-
-    /// Returns the number of aggregator threads
-    pub fn aggregator_num(&self) -> usize {
-        self.aggregator_num
     }
 
     /// Returns the duration between health checks

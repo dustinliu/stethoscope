@@ -1,5 +1,5 @@
 use crate::{
-    agent::{Aggregator, Dispatcher, StdIO, Worker},
+    agent::{Aggregator, Dispatcher, Reporter, Worker},
     broker::Broker,
     config::{self, Config},
     runnable::Runnable,
@@ -51,13 +51,11 @@ impl Controller {
     pub async fn start(&self) {
         let mut tasks = Vec::new();
 
-        if self.config.enable_stdio_reporter() {
-            let stdio_handle = self.run_agent(1, StdIO::new);
-            tasks.push(TaskHandle {
-                name: "StdIO Reporter Group".to_string(),
-                handle: stdio_handle,
-            });
-        }
+        let reporter_handle = self.run_agent(1, Reporter::new);
+        tasks.push(TaskHandle {
+            name: "Reporter Group".to_string(),
+            handle: reporter_handle,
+        });
 
         tasks.push(TaskHandle {
             name: "Aggregator Group".to_string(),
@@ -99,7 +97,12 @@ impl Controller {
         F: Fn(usize, Broker) -> T,
     {
         let agents = (0..num_tasks)
-            .map(|i| Arc::new(task_factory(i, self.broker.clone())))
+            .map(|i| {
+                Arc::new(tokio::sync::Mutex::new(task_factory(
+                    i,
+                    self.broker.clone(),
+                )))
+            })
             .collect::<Vec<_>>();
 
         let mut handles = Vec::with_capacity(num_tasks);
@@ -107,6 +110,7 @@ impl Controller {
         for agent in &agents {
             let agent = agent.clone();
             let handle = tokio::spawn(async move {
+                let mut agent = agent.lock().await;
                 agent.run().await;
             });
             handles.push(handle);
@@ -116,7 +120,12 @@ impl Controller {
         tokio::spawn(async move {
             broker.wait_for_shutdown().await;
             for (i, handle) in handles.into_iter().enumerate() {
-                Self::wait_for_shutdown(TASK_SHUTDOWN_TIMEOUT_SECS, agents[i].name(), handle).await;
+                let agent = agents[i].clone();
+                let name = {
+                    let agent = agent.lock().await;
+                    agent.name().to_string()
+                };
+                Self::wait_for_shutdown(TASK_SHUTDOWN_TIMEOUT_SECS, &name, handle).await;
             }
         })
     }

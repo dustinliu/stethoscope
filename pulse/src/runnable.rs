@@ -15,7 +15,7 @@ use async_trait::async_trait;
 #[async_trait]
 pub trait Runnable {
     /// Starts the asynchronous execution of the component
-    async fn run(&self);
+    async fn run(&mut self);
 
     /// Returns the name identifier of the component
     fn name(&self) -> &str;
