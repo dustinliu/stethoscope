@@ -2,17 +2,17 @@ use crate::{
     config,
     message::{Endpoint, EndpointHistory, QueryResult},
 };
-use log::error;
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, broadcast, mpsc, watch};
 
+#[derive(Debug)]
 pub struct Broker {
     endpoint_tx: mpsc::Sender<Endpoint>,
     endpoint_rx: Arc<Mutex<mpsc::Receiver<Endpoint>>>,
     result_tx: mpsc::Sender<QueryResult>,
     result_rx: Arc<Mutex<mpsc::Receiver<QueryResult>>>,
-    report_tx: mpsc::Sender<EndpointHistory>,
-    report_rx: Arc<Mutex<mpsc::Receiver<EndpointHistory>>>,
+    report_tx: broadcast::Sender<EndpointHistory>,
+    report_rx: broadcast::Receiver<EndpointHistory>,
 
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
@@ -23,11 +23,10 @@ impl Broker {
         let config = config::instance();
         let (endpoint_tx, endpoint_rx) = mpsc::channel(100);
         let (result_tx, result_rx) = mpsc::channel(100);
-        let (report_tx, report_rx) = mpsc::channel(config.reporter.alert_buffer_len);
+        let (report_tx, report_rx) = broadcast::channel(config.reporter.alert_buffer_len);
 
         let endpoint_rx = Arc::new(Mutex::new(endpoint_rx));
         let result_rx = Arc::new(Mutex::new(result_rx));
-        let report_rx = Arc::new(Mutex::new(report_rx));
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -57,11 +56,11 @@ impl Broker {
         self.result_tx.send(result).await
     }
 
-    pub async fn send_report(
+    pub fn send_report(
         &self,
         history: EndpointHistory,
-    ) -> Result<(), mpsc::error::SendError<EndpointHistory>> {
-        self.report_tx.send(history).await
+    ) -> Result<usize, broadcast::error::SendError<EndpointHistory>> {
+        self.report_tx.send(history)
     }
 
     pub async fn receive_endpoint(&self) -> Option<Endpoint> {
@@ -72,8 +71,16 @@ impl Broker {
         self.result_rx.lock().await.recv().await
     }
 
-    pub async fn receive_report(&mut self) -> Option<EndpointHistory> {
-        self.report_rx.lock().await.recv().await
+    pub async fn receive_report(&mut self) -> Result<EndpointHistory, broadcast::error::RecvError> {
+        self.report_rx.recv().await
+    }
+
+    pub fn endpoint_channel_capacity(&self) -> usize {
+        self.endpoint_tx.capacity()
+    }
+
+    pub fn result_channel_capacity(&self) -> usize {
+        self.result_tx.capacity()
     }
 
     pub fn shutdown(&self) {
@@ -93,7 +100,7 @@ impl Broker {
         if let Ok(changed) = self.shutdown_rx.has_changed() {
             changed
         } else {
-            error!("failed to check if shutdown signal has changed, shutting down");
+            tracing::error!("failed to check if shutdown signal has changed, shutting down");
             true
         }
     }
@@ -107,7 +114,7 @@ impl Clone for Broker {
             result_tx: self.result_tx.clone(),
             result_rx: self.result_rx.clone(),
             report_tx: self.report_tx.clone(),
-            report_rx: self.report_rx.clone(),
+            report_rx: self.report_tx.subscribe(),
             shutdown_tx: self.shutdown_tx.clone(),
             shutdown_rx: self.shutdown_tx.subscribe(),
         }

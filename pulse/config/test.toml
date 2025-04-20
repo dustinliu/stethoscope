@@ -1,8 +1,8 @@
-debug = true
+log_level = "trace"
 
 [dispatcher]
 check_interval = "2s"
 
 [reporter]
-enable_stdio = true
+enable_stdout = false
 alert_buffer_len = 10

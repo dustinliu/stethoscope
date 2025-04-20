@@ -1,11 +1,13 @@
 use anyhow::Result;
 use serde::Deserialize;
+use std::str::FromStr;
 /// Configuration module for the Pulse URL monitoring system
 ///
 /// This module manages the global configuration settings for the application,
 /// including worker counts, agent counts, and timing intervals.
 use std::sync::OnceLock;
 use tokio::time::Duration;
+use tracing::Level;
 
 fn parse_duration<'de, D>(deserializer: D) -> Result<Duration, D::Error>
 where
@@ -13,6 +15,14 @@ where
 {
     let s = String::deserialize(deserializer)?;
     humantime::parse_duration(&s).map_err(serde::de::Error::custom)
+}
+
+fn parse_level<'de, D>(deserializer: D) -> Result<Level, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    Level::from_str(&s).map_err(serde::de::Error::custom)
 }
 
 /// Dispatcher 設定，對應 [dispatcher] 區塊
@@ -86,10 +96,13 @@ impl Default for ReporterConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Config {
-    #[serde(default = "Config::default_debug")]
-    pub debug: bool,
+    #[serde(
+        default = "Config::default_log_level",
+        deserialize_with = "parse_level"
+    )]
+    pub log_level: Level,
 
     #[serde(default)]
     pub dispatcher: DispatcherConfig,
@@ -99,6 +112,17 @@ pub struct Config {
 
     #[serde(default)]
     pub reporter: ReporterConfig,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            log_level: Self::default_log_level(),
+            dispatcher: DispatcherConfig::default(),
+            worker: WorkerConfig::default(),
+            reporter: ReporterConfig::default(),
+        }
+    }
 }
 
 static INSTANCE: OnceLock<Config> = OnceLock::new();
@@ -125,7 +149,7 @@ impl Config {
             };
             match toml::from_str::<Config>(&content) {
                 Ok(config) => {
-                    log::debug!("config: {:?}", config);
+                    tracing::debug!("config: {:?}", config);
                     return Ok(config);
                 }
                 Err(e) => {
@@ -134,12 +158,12 @@ impl Config {
             }
         }
 
-        log::warn!("No config file found, use default config");
+        tracing::warn!("No config file found, use default config");
         Err(last_err.unwrap_or_else(|| anyhow::anyhow!("No config file found")))
     }
 
-    fn default_debug() -> bool {
-        false
+    fn default_log_level() -> Level {
+        Level::INFO
     }
 }
 

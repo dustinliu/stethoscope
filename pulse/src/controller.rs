@@ -1,10 +1,10 @@
 use crate::{
-    agent::{Aggregator, Dispatcher, Reporter, Worker},
+    agent::reporter::Stdout,
+    agent::{Aggregator, Dispatcher, Worker},
     broker::Broker,
     config::{self, Config},
     runnable::Runnable,
 };
-use log::{debug, info, warn};
 use std::{sync::Arc, time::Duration};
 use tokio::{
     signal::unix::{SignalKind, signal},
@@ -58,7 +58,9 @@ impl Controller {
     /// 3. Continuously receives and processes responses
     pub async fn start(&self) {
         let mut tasks = Vec::new();
-        add_task_group!(tasks, self, "Reporter", 1, Reporter::new);
+        if self.config.reporter.enable_stdout {
+            add_task_group!(tasks, self, "Stdout Reporter", 1, Stdout::new);
+        }
         add_task_group!(tasks, self, "Aggregator", AGGREGATOR_NUM, Aggregator::new);
         add_task_group!(tasks, self, "Worker", self.config.worker.num_instance, Worker::new);
         add_task_group!(tasks, self, "Dispatcher", DISPATCHER_NUM, Dispatcher::new);
@@ -68,22 +70,22 @@ impl Controller {
         let mut sigterm_stream = signal(SignalKind::terminate()).expect("watch SIGTERM failed");
         tokio::select! {
             _ = sigint_stream.recv() => {
-                info!("SIGINT received, shutdown initiated...");
+                tracing::info!("SIGINT received, shutdown initiated...");
                 self.broker.shutdown();
             }
             _ = sigterm_stream.recv() => {
-                info!("SIGTERM received, shutdown initiated...");
+                tracing::info!("SIGTERM received, shutdown initiated...");
                 self.broker.shutdown();
             }
         }
 
         for task in tasks.into_iter().rev() {
-            info!("waiting for {} shutdown", task.name);
+            tracing::info!("waiting for {} shutdown", task.name);
             Self::wait_for_shutdown(SHUTDOWN_TIMEOUT_SECS, &task.name, task.handle).await;
-            info!("{} shutdown complete", task.name);
+            tracing::info!("{} shutdown complete", task.name);
         }
 
-        info!("All tasks shutdown complete");
+        tracing::info!("All tasks shutdown complete");
     }
 
     fn run_agent<T, F>(&self, num_tasks: usize, task_factory: F) -> JoinHandle<()>
@@ -125,17 +127,21 @@ impl Controller {
         task_name: &str,
         handle: tokio::task::JoinHandle<T>,
     ) {
-        debug!("waiting for {} shutdown", task_name);
+        tracing::debug!("waiting for {} shutdown", task_name);
         match timeout(wait_timeout, handle).await {
             Ok(result) => {
                 if let Err(e) = result {
-                    warn!("{} shutdown error: {}", task_name, e);
+                    tracing::warn!("{} shutdown error: {}", task_name, e);
                 } else {
-                    debug!("{} shutdown completed successfully", task_name);
+                    tracing::debug!("{} shutdown completed successfully", task_name);
                 }
             }
             Err(_) => {
-                warn!("{} shutdown timed out after {} seconds", task_name, wait_timeout.as_secs());
+                tracing::warn!(
+                    "{} shutdown timed out after {} seconds",
+                    task_name,
+                    wait_timeout.as_secs()
+                );
             }
         }
     }

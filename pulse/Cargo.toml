@@ -4,17 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-reqwest = { version = "0.12.15", features = ["blocking"] }
+reqwest = { version = "0.12.15" }
 tokio = { version = "1.44.2", features = ["full"] }
 chrono = { version = "0.4.40", features = ["serde"] }
 async-trait = "0.1.88"
-env_logger = "0.11.8"
-log = "0.4.27"
-console-subscriber = "0.4.1"
 anyhow = "1.0.98"
 serde = { version = "1.0.219", features = ["derive"] }
 toml = "0.8.20"
 humantime = "2.2.0"
+tracing = { version = "0.1.41" }
+tracing-subscriber = { version = "0.3.19" }
+pulse_proc_macros = { path = "../pulse_proc_macros" }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"

@@ -2,8 +2,7 @@ use crate::config::{self, Config};
 use crate::runnable::Runnable;
 use crate::{broker::Broker, message::Endpoint};
 use async_trait::async_trait;
-use log::warn;
-use tokio::time::{Duration, interval};
+use tokio::time::{Duration, MissedTickBehavior, interval};
 
 /// Prefix for dispatcher instance names
 const DISPATCHER_NAME_PREFIX: &str = "Dispatcher";
@@ -68,11 +67,9 @@ impl Dispatcher {
     /// 2. Generates and sends URLs at each interval
     /// 3. Monitors for shutdown signals
     async fn dispatch_urls(&self) {
-        let mut interval = interval(self.config.dispatcher.check_interval);
-        interval.tick().await;
         for url in Self::gen_urls() {
             if let Err(e) = self.broker.send_endpoint(url).await {
-                warn!("Failed to send URL: {}", e);
+                tracing::error!("Failed to send URL: {}", e);
             }
         }
     }
@@ -82,12 +79,17 @@ impl Dispatcher {
 impl Runnable for Dispatcher {
     async fn run(&mut self) {
         let mut broker = self.broker.clone();
+        let mut interval = interval(self.config.dispatcher.check_interval);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
         loop {
             tokio::select! {
                 _ = broker.wait_for_shutdown() => {
                     break;
                 }
-                _ = self.dispatch_urls() => {}
+                _ = self.dispatch_urls() => {
+                   interval.tick().await;
+                }
             }
         }
     }

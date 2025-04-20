@@ -8,7 +8,6 @@ mod config;
 mod controller;
 mod logger;
 mod message;
-// mod reporter;
 mod runnable;
 
 use controller::Controller;
@@ -21,7 +20,7 @@ use controller::Controller;
 /// 3. Begins the URL monitoring process
 #[tokio::main]
 async fn main() {
-    logger::init_logger();
+    logger::init();
 
     // console_subscriber::init();
     let controller = Controller::new();

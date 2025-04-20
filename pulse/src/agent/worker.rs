@@ -10,7 +10,6 @@ use crate::{
     message::{QueryRecord, QueryResult},
 };
 use async_trait::async_trait;
-use log::warn;
 
 /// Prefix for worker instance names
 const WORKER_NAME_PREFIX: &str = "Worker";
@@ -25,6 +24,7 @@ const WORKER_NAME_PREFIX: &str = "Worker";
 /// * `url_receiver` - Receiver for incoming URL queries
 /// * `result_sender` - Sender to transmit processed query results
 /// * `client` - Shared HTTP client instance for making requests
+#[derive(Debug)]
 pub struct Worker {
     name: String,
     broker: Broker,
@@ -124,7 +124,7 @@ impl Worker {
             };
 
             if let Err(e) = self.broker.send_result(result).await {
-                warn!("Failed to send result: {}", e);
+                tracing::warn!("Failed to send result: {}", e);
             }
 
             if self.broker.is_shutdown() {
@@ -232,10 +232,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(
-            result.record.status,
-            reqwest::StatusCode::INTERNAL_SERVER_ERROR
-        );
+        assert_eq!(result.record.status, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
         assert!(result.record.duration.as_secs_f64() > 0.0);
     }
 
@@ -273,10 +270,7 @@ mod tests {
 
         worker_handle.abort();
 
-        assert_eq!(
-            result.record.status,
-            reqwest::StatusCode::SERVICE_UNAVAILABLE
-        );
+        assert_eq!(result.record.status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
         assert!(result.record.duration.as_secs_f64() > 0.0);
     }
 }

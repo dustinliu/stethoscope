@@ -19,6 +19,7 @@ const AGGREGATOR_NAME_PREFIX: &str = "Aggregator";
 /// * `name` - Name of the aggregator instance
 /// * `result_receiver` - Channel for receiving results from workers
 /// * `shutdown_receiver` - Receiver for shutdown signals
+#[derive(Debug)]
 pub struct Aggregator {
     name: String,
     broker: Broker,
@@ -53,8 +54,10 @@ impl Aggregator {
     /// This method:
     /// 1. Receives results from the worker channel
     /// 2. Processes each result and logs the outcome
+    // #[instrument(level = Level::DEBUG, skip(self))]
     async fn process_results(&self, result: QueryResult) {
         let mut pool = self.pool.lock().await;
+        tracing::debug!("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
         let history = pool.entry(result.endpoint.id).or_insert(EndpointHistory {
             endpoint: result.endpoint.clone(),
             events: Vec::new(),
@@ -68,17 +71,12 @@ impl Aggregator {
         // Update endpoint information as it might have changed
         history.endpoint = result.endpoint;
         history.events.push(result.record);
-        log::trace!("{:?}", history);
 
         let threshold = history.endpoint.failure_threshold as usize;
         Self::retain_recent_events(&mut history.events, threshold);
 
         if history.events.len() == threshold {
-            let report = EndpointHistory {
-                endpoint: history.endpoint.clone(),
-                events: history.events.clone(),
-            };
-            let _ = self.broker.send_report(report).await;
+            let _ = self.broker.send_report(history.clone());
             history.events.clear();
         }
     }
@@ -169,10 +167,7 @@ mod tests {
             // 檢查 endpoint 資訊是否正確保存
             assert_eq!(history.endpoint.id, endpoint.id);
             assert_eq!(history.endpoint.url, endpoint.url);
-            assert_eq!(
-                history.endpoint.failure_threshold,
-                endpoint.failure_threshold
-            );
+            assert_eq!(history.endpoint.failure_threshold, endpoint.failure_threshold);
 
             // 檢查最後一個事件內容是否正確
             if i == 0 {
@@ -253,7 +248,7 @@ mod tests {
 
                 // 驗證 report 被送出
                 let report = report_receiver.await.expect("接收任務失敗");
-                assert!(report.is_some(), "達到 threshold 應該送出報告");
+                assert!(report.is_ok(), "達到 threshold 應該送出報告");
                 let report = report.unwrap();
                 assert_eq!(report.events.len(), 3);
                 assert_eq!(report.endpoint.id, endpoint.id);
@@ -292,14 +287,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_threshold_and_overflow_handling() {
-        // 使用 failure_threshold=2 的 endpoint
         let endpoint = make_endpoint(2);
         let now = Utc::now();
 
-        // 創建 5 個事件，模擬：
-        // 1-2: 達到閾值，發送第一次報告
-        // 3-4: 達到閾值，發送第二次報告
-        // 5: 未達閾值，保留在 pool
         let events = vec![
             make_event(
                 &endpoint,
@@ -331,6 +321,9 @@ mod tests {
         let broker = Broker::new();
         let aggregator = Aggregator::new(0, broker.clone());
 
+        // 創建一個 report_broker 用於接收報告
+        let mut report_broker = broker.clone();
+
         // 期望的 pool 長度
         // 第一輪：1個→0個（達到閾值）
         // 第二輪：1個→0個（達到閾值）
@@ -357,13 +350,12 @@ mod tests {
             drop(pool);
 
             // 檢查報告
-            let mut report_broker = broker.clone();
             if report_events.contains(&i) {
                 // 此事件應該觸發報告
                 let report = report_broker.receive_report().await;
-                assert!(report.is_some(), "第 {} 個事件應觸發報告", i + 1);
+                assert!(report.is_ok(), "第 {} 個事件應觸發報告", i + 1);
 
-                if let Some(report) = report {
+                if let Ok(report) = report {
                     assert_eq!(report.endpoint.id, endpoint.id);
                     assert_eq!(report.events.len(), 2, "報告應包含 2 個事件");
 

@@ -1,5 +1,5 @@
 pub mod executor;
-pub mod stdio;
+pub mod stdout;
 
 pub use executor::Executor;
-pub use stdio::StdIO;
+pub use stdout::Stdout;
