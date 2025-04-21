@@ -109,6 +109,71 @@ mod tests {
     use reqwest::StatusCode;
     use std::time::Duration;
 
+    /// 測試輔助結構體，封裝常見的測試設置
+    struct TestContext {
+        aggregator: Aggregator,
+        broker: Broker,
+    }
+
+    impl TestContext {
+        /// 創建一個新的測試上下文
+        fn new() -> Self {
+            let broker = Broker::new();
+            let aggregator = Aggregator::new(0, broker.clone());
+            Self { aggregator, broker }
+        }
+
+        /// 處理一個事件並返回 pool 中的歷史記錄
+        async fn process_event(&self, event: QueryResult) -> EndpointHistory {
+            self.aggregator.process_results(event.clone()).await;
+            // 等待一小段時間，確保報告能夠被發送
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let pool = self.aggregator.pool.lock().await;
+            pool.get(&event.endpoint.id).unwrap().clone()
+        }
+
+        /// 檢查報告是否被發送，使用超時避免永久等待
+        async fn check_report_sent(
+            &mut self,
+            should_send: bool,
+            timeout_ms: u64,
+        ) -> Option<EndpointHistory> {
+            let timeout_result = tokio::time::timeout(
+                tokio::time::Duration::from_millis(timeout_ms),
+                self.broker.receive_report(),
+            )
+            .await;
+
+            match timeout_result {
+                Ok(Ok(report)) => {
+                    if !should_send {
+                        panic!("報告不應該被發送");
+                    }
+                    Some(report)
+                }
+                Ok(Err(_)) => {
+                    if should_send {
+                        panic!("報告應該被發送");
+                    }
+                    None
+                }
+                Err(_) => {
+                    if should_send {
+                        panic!("報告應該被發送，但超時了");
+                    }
+                    None
+                }
+            }
+        }
+
+        /// 檢查 pool 中的事件數量
+        async fn check_pool_events_count(&self, endpoint_id: u32, expected_count: usize) {
+            let pool = self.aggregator.pool.lock().await;
+            let history = pool.get(&endpoint_id).unwrap();
+            assert_eq!(history.events.len(), expected_count);
+        }
+    }
+
     fn make_endpoint(failure_threshold: u8) -> Endpoint {
         Endpoint {
             id: 0,
@@ -142,24 +207,11 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR,
             now,
         )];
-        let broker = Broker::new();
-        let aggregator = Aggregator::new(0, broker.clone());
 
-        // 創建一個任務監聽是否有 report 被送出
-        let mut report_broker = broker.clone();
-        let report_check = tokio::spawn(async move {
-            // 使用短超時，避免永久等待
-            tokio::time::timeout(
-                tokio::time::Duration::from_millis(10),
-                report_broker.receive_report(),
-            )
-            .await
-        });
+        let mut ctx = TestContext::new();
 
         for (i, event) in events.iter().enumerate() {
-            aggregator.process_results(event.clone()).await;
-            let pool = aggregator.pool.lock().await;
-            let history = pool.get(&endpoint.id).unwrap();
+            let history = ctx.process_event(event.clone()).await;
 
             // 檢查 event 數量
             assert_eq!(history.events.len(), i + 1);
@@ -177,14 +229,10 @@ mod tests {
         }
 
         // 最後確認 pool 內仍存在 event（未達到 threshold）
-        let pool = aggregator.pool.lock().await;
-        let history = pool.get(&endpoint.id).unwrap();
-        assert_eq!(history.events.len(), 1);
-        assert_eq!(history.events[0].status, StatusCode::INTERNAL_SERVER_ERROR);
+        ctx.check_pool_events_count(endpoint.id, 1).await;
 
         // 驗證沒有 report 被送出
-        let report_result = report_check.await.expect("檢查任務失敗");
-        assert!(report_result.is_err(), "報告不應該在 threshold 前送出");
+        ctx.check_report_sent(false, 100).await;
     }
 
     #[tokio::test]
@@ -204,54 +252,29 @@ mod tests {
             ),
             make_event(&endpoint, StatusCode::INTERNAL_SERVER_ERROR, now),
         ];
-        let broker = Broker::new();
-        let aggregator = Aggregator::new(0, broker.clone());
+
+        let mut ctx = TestContext::new();
 
         for (i, event) in events.iter().enumerate() {
             if i < 2 {
                 // 前兩個事件送出時不應該有 report
-                let mut report_broker = broker.clone();
-                let report_check = tokio::spawn(async move {
-                    // 使用 10ms 超時避免永久等待
-
-                    tokio::time::timeout(
-                        tokio::time::Duration::from_millis(10),
-                        report_broker.receive_report(),
-                    )
-                    .await
-                });
-
-                // 送入事件
-                aggregator.process_results(event.clone()).await;
-
-                // 檢查 pool 內容
-                let pool = aggregator.pool.lock().await;
-                let history = pool.get(&endpoint.id).unwrap();
+                let history = ctx.process_event(event.clone()).await;
                 assert_eq!(history.events.len(), i + 1);
 
                 // 確認沒有 report 被送出
-                let report_result = report_check.await.expect("檢查任務失敗");
-                assert!(report_result.is_err(), "報告不應該在 threshold 前送出");
+                ctx.check_report_sent(false, 100).await;
             } else {
                 // 第三個事件應該觸發 report
-                let mut report_broker = broker.clone();
-                let report_receiver =
-                    tokio::spawn(async move { report_broker.receive_report().await });
-
-                // 送入事件
-                aggregator.process_results(event.clone()).await;
-
-                // 檢查 pool 被清空
-                let pool = aggregator.pool.lock().await;
-                let history = pool.get(&endpoint.id).unwrap();
-                assert_eq!(history.events.len(), 0);
+                ctx.process_event(event.clone()).await;
 
                 // 驗證 report 被送出
-                let report = report_receiver.await.expect("接收任務失敗");
-                assert!(report.is_ok(), "達到 threshold 應該送出報告");
-                let report = report.unwrap();
-                assert_eq!(report.events.len(), 3);
-                assert_eq!(report.endpoint.id, endpoint.id);
+                if let Some(report) = ctx.check_report_sent(true, 100).await {
+                    assert_eq!(report.events.len(), 3);
+                    assert_eq!(report.endpoint.id, endpoint.id);
+                }
+
+                // 檢查 pool 被清空
+                ctx.check_pool_events_count(endpoint.id, 0).await;
             }
         }
     }
@@ -273,15 +296,15 @@ mod tests {
             ),
             make_event(&endpoint, StatusCode::INTERNAL_SERVER_ERROR, now),
         ];
-        let broker = Broker::new();
-        let aggregator = Aggregator::new(0, broker.clone());
+
+        let ctx = TestContext::new();
+
         for (i, event) in events.iter().enumerate() {
-            aggregator.process_results(event.clone()).await;
-            let pool = aggregator.pool.lock().await;
-            let history = pool.get(&endpoint.id).unwrap();
+            ctx.process_event(event.clone()).await;
+
             // 累積到 threshold 就會清空
             let expected = if i == 2 { 0 } else { i + 1 };
-            assert_eq!(history.events.len(), expected);
+            ctx.check_pool_events_count(endpoint.id, expected).await;
         }
     }
 
@@ -318,11 +341,7 @@ mod tests {
             ),
         ];
 
-        let broker = Broker::new();
-        let aggregator = Aggregator::new(0, broker.clone());
-
-        // 創建一個 report_broker 用於接收報告
-        let mut report_broker = broker.clone();
+        let mut ctx = TestContext::new();
 
         // 期望的 pool 長度
         // 第一輪：1個→0個（達到閾值）
@@ -335,27 +354,12 @@ mod tests {
 
         for (i, event) in events.iter().enumerate() {
             // 送入事件
-            aggregator.process_results(event.clone()).await;
-
-            // 檢查 pool 長度
-            let pool = aggregator.pool.lock().await;
-            let history = pool.get(&endpoint.id).unwrap();
-            assert_eq!(
-                history.events.len(),
-                expected_pool_lens[i],
-                "第 {} 個事件後，pool 長度應為 {}",
-                i + 1,
-                expected_pool_lens[i]
-            );
-            drop(pool);
+            ctx.process_event(event.clone()).await;
 
             // 檢查報告
             if report_events.contains(&i) {
                 // 此事件應該觸發報告
-                let report = report_broker.receive_report().await;
-                assert!(report.is_ok(), "第 {} 個事件應觸發報告", i + 1);
-
-                if let Ok(report) = report {
+                if let Some(report) = ctx.check_report_sent(true, 100).await {
                     assert_eq!(report.endpoint.id, endpoint.id);
                     assert_eq!(report.events.len(), 2, "報告應包含 2 個事件");
 
@@ -368,14 +372,13 @@ mod tests {
                     assert_eq!(report.events[0].timestamp, expected_first_timestamp);
                 }
             } else {
-                // 此事件不應該觸發報告，使用超時檢查
-                let timeout_result = tokio::time::timeout(
-                    tokio::time::Duration::from_millis(10),
-                    report_broker.receive_report(),
-                )
-                .await;
-                assert!(timeout_result.is_err(), "第 {} 個事件不應觸發報告", i + 1);
+                // 此事件不應該觸發報告
+                ctx.check_report_sent(false, 100).await;
             }
+
+            // 檢查 pool 長度
+            ctx.check_pool_events_count(endpoint.id, expected_pool_lens[i])
+                .await;
         }
     }
 
@@ -389,18 +392,16 @@ mod tests {
             make_event(&endpoint, StatusCode::INTERNAL_SERVER_ERROR, now),
         ];
 
-        let broker = Broker::new();
-        let aggregator = Aggregator::new(0, broker.clone());
+        let ctx = TestContext::new();
 
         let expected_pool_lens = [1, 2, 0]; // 累積到 3 個時，清空 pool
         for (i, event) in events.iter().enumerate() {
-            aggregator.process_results(event.clone()).await;
-            let pool = aggregator.pool.lock().await;
-            let history = pool.get(&endpoint.id).unwrap();
-            assert_eq!(history.events.len(), expected_pool_lens[i]);
+            ctx.process_event(event.clone()).await;
+            ctx.check_pool_events_count(endpoint.id, expected_pool_lens[i])
+                .await;
         }
 
-        assert_eq!(aggregator.pool.lock().await.len(), 1); // 仍然有一個 endpoint
+        assert_eq!(ctx.aggregator.pool.lock().await.len(), 1); // 仍然有一個 endpoint
     }
 
     #[tokio::test]
@@ -412,25 +413,14 @@ mod tests {
             make_event(&endpoint, StatusCode::OK, now),
         ];
 
-        let broker = Broker::new();
-        let aggregator = Aggregator::new(0, broker.clone());
+        let ctx = TestContext::new();
 
         for event in events {
-            let _ = aggregator.process_results(event).await;
+            ctx.process_event(event).await;
         }
 
-        assert_eq!(aggregator.pool.lock().await.len(), 1);
-        assert_eq!(
-            aggregator
-                .pool
-                .lock()
-                .await
-                .get(&endpoint.id)
-                .unwrap()
-                .events
-                .len(),
-            0
-        );
+        assert_eq!(ctx.aggregator.pool.lock().await.len(), 1);
+        ctx.check_pool_events_count(endpoint.id, 0).await;
     }
 
     #[tokio::test]
@@ -463,23 +453,22 @@ mod tests {
             now + ChronoDuration::seconds(10),
         );
 
-        let broker = Broker::new();
-        let aggregator = Aggregator::new(0, broker.clone());
+        let ctx = TestContext::new();
 
-        aggregator.process_results(initial_event).await;
+        ctx.process_event(initial_event).await;
 
         {
-            let pool = aggregator.pool.lock().await;
+            let pool = ctx.aggregator.pool.lock().await;
             let history = pool.get(&initial_endpoint.id).unwrap();
             assert_eq!(history.endpoint.url, initial_endpoint.url);
             assert_eq!(history.endpoint.failure_threshold, 3);
             assert_eq!(history.endpoint.timeout, initial_endpoint.timeout);
         }
 
-        aggregator.process_results(updated_event).await;
+        ctx.process_event(updated_event).await;
 
         {
-            let pool = aggregator.pool.lock().await;
+            let pool = ctx.aggregator.pool.lock().await;
             let history = pool.get(&initial_endpoint.id).unwrap();
             assert_eq!(history.endpoint.failure_threshold, 5); // 應該更新為 5
             assert_eq!(history.endpoint.url, updated_endpoint.url);
