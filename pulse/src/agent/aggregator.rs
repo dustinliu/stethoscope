@@ -4,6 +4,7 @@ use crate::runnable::Runnable;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
+use tracing::{Level, instrument};
 
 /// Prefix for aggregator instance names
 const AGGREGATOR_NAME_PREFIX: &str = "Aggregator";
@@ -54,10 +55,8 @@ impl Aggregator {
     /// This method:
     /// 1. Receives results from the worker channel
     /// 2. Processes each result and logs the outcome
-    // #[instrument(level = Level::DEBUG, skip(self))]
     async fn process_results(&self, result: QueryResult) {
         let mut pool = self.pool.lock().await;
-        tracing::debug!("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
         let history = pool.entry(result.endpoint.id).or_insert(EndpointHistory {
             endpoint: result.endpoint.clone(),
             events: Vec::new(),

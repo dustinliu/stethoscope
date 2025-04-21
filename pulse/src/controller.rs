@@ -17,14 +17,6 @@ const TASK_SHUTDOWN_TIMEOUT_SECS: Duration = Duration::from_secs(3);
 const AGGREGATOR_NUM: usize = 1;
 const DISPATCHER_NUM: usize = 1;
 
-macro_rules! add_task_group {
-    ($tasks:expr, $self:expr, $name:expr, $num:expr, $agent_type:expr) => {
-        $tasks.push(TaskHandle {
-            name: format!("{} Group", $name),
-            handle: $self.run_agent($num, $agent_type),
-        });
-    };
-}
 /// Controller that manages the URL monitoring system
 ///
 /// Coordinates between agents and workers by:
@@ -59,11 +51,26 @@ impl Controller {
     pub async fn start(&self) {
         let mut tasks = Vec::new();
         if self.config.reporter.enable_stdout {
-            add_task_group!(tasks, self, "Stdout Reporter", 1, Stdout::new);
+            self.add_task_group::<Stdout, _>(&mut tasks, "Stdout Reporter", 1, Stdout::new);
         }
-        add_task_group!(tasks, self, "Aggregator", AGGREGATOR_NUM, Aggregator::new);
-        add_task_group!(tasks, self, "Worker", self.config.worker.num_instance, Worker::new);
-        add_task_group!(tasks, self, "Dispatcher", DISPATCHER_NUM, Dispatcher::new);
+        self.add_task_group::<Aggregator, _>(
+            &mut tasks,
+            "Aggregator",
+            AGGREGATOR_NUM,
+            Aggregator::new,
+        );
+        self.add_task_group::<Worker, _>(
+            &mut tasks,
+            "Worker",
+            self.config.worker.num_instance,
+            Worker::new,
+        );
+        self.add_task_group::<Dispatcher, _>(
+            &mut tasks,
+            "Dispatcher",
+            DISPATCHER_NUM,
+            Dispatcher::new,
+        );
 
         // Wait for SIGINT or SIGTERM to initiate shutdown
         let mut sigint_stream = signal(SignalKind::interrupt()).expect("watch SIGINT failed");
@@ -144,6 +151,23 @@ impl Controller {
                 );
             }
         }
+    }
+
+    /// Add a task group to the tasks vector
+    fn add_task_group<T, F>(
+        &self,
+        tasks: &mut Vec<TaskHandle>,
+        name: &str,
+        num: usize,
+        agent_type: F,
+    ) where
+        T: Runnable + Send + Sync + 'static,
+        F: Fn(usize, Broker) -> T,
+    {
+        tasks.push(TaskHandle {
+            name: format!("{} Group", name),
+            handle: self.run_agent::<T, F>(num, agent_type),
+        });
     }
 }
 

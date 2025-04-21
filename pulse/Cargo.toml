@@ -13,7 +13,7 @@ serde = { version = "1.0.219", features = ["derive"] }
 toml = "0.8.20"
 humantime = "2.2.0"
 tracing = { version = "0.1.41" }
-tracing-subscriber = { version = "0.3.19" }
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
 pulse_proc_macros = { path = "../pulse_proc_macros" }
 
 [dev-dependencies]

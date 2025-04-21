@@ -22,7 +22,5 @@ use controller::Controller;
 async fn main() {
     logger::init();
 
-    // console_subscriber::init();
-    let controller = Controller::new();
-    controller.start().await;
+    Controller::new().start().await
 }

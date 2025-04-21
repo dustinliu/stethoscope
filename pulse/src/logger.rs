@@ -1,11 +1,10 @@
-pub fn init() {
-    // let filter = EnvFilter::builder()
-    //     .with_default_directive(LevelFilter::INFO.into())
-    //     .from_env()
-    //     .unwrap()
-    //     .add_directive("pulse=trace".parse().unwrap());
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-    tracing_subscriber::fmt()
-        // .with_max_level(config::instance().log_level)
+pub fn init() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("pulse=info"));
+
+    tracing_subscriber::registry()
+        .with(fmt::layer())
+        .with(filter)
         .init();
 }
