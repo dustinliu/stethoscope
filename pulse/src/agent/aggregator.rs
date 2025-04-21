@@ -4,7 +4,6 @@ use crate::runnable::Runnable;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
-use tracing::{Level, instrument};
 
 /// Prefix for aggregator instance names
 const AGGREGATOR_NAME_PREFIX: &str = "Aggregator";
@@ -85,6 +84,7 @@ impl Aggregator {
 impl Runnable for Aggregator {
     async fn run(&mut self) {
         while let Some(result) = self.broker.receive_result().await {
+            // tracing::trace!("result capacity: {}", self.broker.result_channel_capacity());
             self.process_results(result).await;
 
             if self.broker.is_shutdown() {

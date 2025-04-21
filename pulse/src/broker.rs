@@ -75,14 +75,6 @@ impl Broker {
         self.report_rx.recv().await
     }
 
-    pub fn endpoint_channel_capacity(&self) -> usize {
-        self.endpoint_tx.capacity()
-    }
-
-    pub fn result_channel_capacity(&self) -> usize {
-        self.result_tx.capacity()
-    }
-
     pub fn shutdown(&self) {
         self.shutdown_tx
             .send(true)

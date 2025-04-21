@@ -20,7 +20,7 @@ use controller::Controller;
 /// 3. Begins the URL monitoring process
 #[tokio::main]
 async fn main() {
-    logger::init();
+    let _logger = logger::init();
 
     Controller::new().start().await
 }

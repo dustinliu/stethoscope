@@ -14,6 +14,7 @@ toml = "0.8.20"
 humantime = "2.2.0"
 tracing = { version = "0.1.41" }
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2.3"
 pulse_proc_macros = { path = "../pulse_proc_macros" }
 
 [dev-dependencies]

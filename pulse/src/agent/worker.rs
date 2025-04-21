@@ -63,6 +63,9 @@ impl Worker {
     /// * `endpoint` - The endpoint to process
     async fn process_endpoint(&self) {
         while let Some(endpoint) = self.broker.receive_endpoint().await {
+            if self.name == "Worker-0" {
+                tracing::trace!("{} querying endpoint: {}", self.name, endpoint.url);
+            }
             let timestamp = chrono::Utc::now();
             let start_time = tokio::time::Instant::now();
 
@@ -74,14 +77,19 @@ impl Worker {
                 .send()
                 .await
             {
-                Ok(response) => QueryResult {
-                    endpoint,
-                    record: QueryRecord {
-                        status: response.status(),
-                        timestamp,
-                        duration: start_time.elapsed(),
-                    },
-                },
+                Ok(response) => {
+                    if self.name == "Worker-0" {
+                        tracing::trace!("{} received response: {}", self.name, response.status());
+                    }
+                    QueryResult {
+                        endpoint,
+                        record: QueryRecord {
+                            status: response.status(),
+                            timestamp,
+                            duration: start_time.elapsed(),
+                        },
+                    }
+                }
                 Err(e) => {
                     if e.is_connect() {
                         QueryResult {
@@ -123,14 +131,25 @@ impl Worker {
                 }
             };
 
+            if self.name == "Worker-0" {
+                tracing::trace!("{} sending result", self.name);
+            }
             if let Err(e) = self.broker.send_result(result).await {
                 tracing::warn!("Failed to send result: {}", e);
             }
+            if self.name == "Worker-0" {
+                tracing::trace!("{} result sent", self.name);
+            }
 
             if self.broker.is_shutdown() {
+                tracing::debug!("{}: Broker is shutdown", self.name);
                 break;
             }
+            if self.name == "Worker-0" {
+                tracing::trace!("{}: Worker job ended", self.name);
+            }
         }
+        tracing::trace!("{}: Worker loop ended", self.name);
     }
 }
 

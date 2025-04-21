@@ -27,7 +27,7 @@ const DISPATCHER_NUM: usize = 1;
 /// # Fields
 /// * `shutdown_sender` - Channel for sending shutdown signals to all tasks
 pub struct Controller {
-    broker: Broker,
+    broker: Option<Broker>,
     config: &'static Config,
 }
 
@@ -37,7 +37,7 @@ impl Controller {
     /// Initializes channels with a buffer size of 100 for both request and response channels
     pub fn new() -> Self {
         Self {
-            broker: Broker::new(),
+            broker: Some(Broker::new()),
             config: config::instance(),
         }
     }
@@ -48,7 +48,7 @@ impl Controller {
     /// 1. Spawns agent and worker tasks for parallel processing
     /// 2. Starts monitoring tasks to ensure agents and workers are running
     /// 3. Continuously receives and processes responses
-    pub async fn start(&self) {
+    pub async fn start(&mut self) {
         let mut tasks = Vec::new();
         if self.config.reporter.enable_stdout {
             self.add_task_group::<Stdout, _>(&mut tasks, "Stdout Reporter", 1, Stdout::new);
@@ -78,13 +78,19 @@ impl Controller {
         tokio::select! {
             _ = sigint_stream.recv() => {
                 tracing::info!("SIGINT received, shutdown initiated...");
-                self.broker.shutdown();
+                if let Some(broker) = self.broker.as_ref() {
+                    broker.shutdown();
+                }
             }
             _ = sigterm_stream.recv() => {
                 tracing::info!("SIGTERM received, shutdown initiated...");
-                self.broker.shutdown();
+                if let Some(broker) = self.broker.as_ref() {
+                    broker.shutdown();
+                }
             }
         }
+
+        let _ = self.broker.take();
 
         for task in tasks.into_iter().rev() {
             tracing::info!("waiting for {} shutdown", task.name);
@@ -93,6 +99,7 @@ impl Controller {
         }
 
         tracing::info!("All tasks shutdown complete");
+        // Drop broker after shutdown
     }
 
     fn run_agent<T, F>(&self, num_tasks: usize, task_factory: F) -> JoinHandle<()>
@@ -100,8 +107,9 @@ impl Controller {
         T: Runnable + Send + Sync + 'static,
         F: Fn(usize, Broker) -> T,
     {
+        let broker = self.broker.as_ref().expect("broker should exist").clone();
         let agents = (0..num_tasks)
-            .map(|i| Arc::new(tokio::sync::Mutex::new(task_factory(i, self.broker.clone()))))
+            .map(|i| Arc::new(tokio::sync::Mutex::new(task_factory(i, broker.clone()))))
             .collect::<Vec<_>>();
 
         let mut handles = Vec::with_capacity(num_tasks);
@@ -115,7 +123,7 @@ impl Controller {
             handles.push(handle);
         }
 
-        let mut broker = self.broker.clone();
+        let mut broker = self.broker.as_ref().expect("broker should exist").clone();
         tokio::spawn(async move {
             broker.wait_for_shutdown().await;
             for (i, handle) in handles.into_iter().enumerate() {
