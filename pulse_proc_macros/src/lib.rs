@@ -138,17 +138,15 @@ pub fn reporter(_attr: TokenStream, item: TokenStream) -> TokenStream {
                         Ok(report) => {
                             <Self as crate::agent::reporter::executor::Executor>::report(self, report).await;
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                            tracing::warn!("[reporter] receiver lagged behind, skipped {} messages", skipped);
-                            continue;
-                        }
                         Err(e) => {
-                            tracing::warn!("[reporter] receive report error: {}", e);
-                            break;
+                            if let Some(recv_error) = e.downcast_ref::<tokio::sync::broadcast::error::RecvError>() {
+                                tracing::warn!("[reporter] recoverable broadcast error: {}. Continuing...", recv_error);
+                                continue;
+                            } else {
+                                tracing::debug!("[reporter] {} detected shutdown signal via error: {}. Stopping...", self.name(), e);
+                                break;
+                            }
                         }
-                    }
-                    if self.broker.is_shutdown() {
-                        break;
                     }
                 }
             }

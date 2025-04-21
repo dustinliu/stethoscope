@@ -2,6 +2,7 @@ use crate::{
     config,
     message::{Endpoint, EndpointHistory, QueryResult},
 };
+use anyhow::{Context, Result, anyhow};
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast, mpsc, watch};
 
@@ -42,37 +43,79 @@ impl Broker {
         }
     }
 
-    pub async fn send_endpoint(
-        &self,
-        endpoint: Endpoint,
-    ) -> Result<(), mpsc::error::SendError<Endpoint>> {
-        self.endpoint_tx.send(endpoint).await
+    pub async fn send_endpoint(&self, endpoint: Endpoint) -> Result<()> {
+        let endpoint_desc = format!("{:?}", endpoint);
+        let mut shutdown_rx = self.shutdown_rx.clone();
+        tokio::select! {
+            result = self.endpoint_tx.send(endpoint) => {
+                result.with_context(|| format!("failed to send endpoint: {}", endpoint_desc))?
+            },
+            _ = shutdown_rx.changed() => {
+                anyhow::bail!("broker is shutting down, cannot send endpoint: {}", endpoint_desc);
+            }
+        }
+        Ok(())
     }
 
-    pub async fn send_result(
-        &self,
-        result: QueryResult,
-    ) -> Result<(), mpsc::error::SendError<QueryResult>> {
-        self.result_tx.send(result).await
+    pub async fn send_result(&self, result: QueryResult) -> Result<()> {
+        let result_desc = format!("{:?}", result);
+        let mut shutdown_rx = self.shutdown_rx.clone();
+        tokio::select! {
+            send_result = self.result_tx.send(result) => {
+                send_result.with_context(|| format!("failed to send query result: {}", result_desc))?
+            },
+            _ = shutdown_rx.changed() => {
+                anyhow::bail!("broker is shutting down, cannot send query result: {}", result_desc);
+            }
+        }
+        Ok(())
     }
 
-    pub fn send_report(
-        &self,
-        history: EndpointHistory,
-    ) -> Result<usize, broadcast::error::SendError<EndpointHistory>> {
-        self.report_tx.send(history)
+    pub fn send_report(&self, history: EndpointHistory) -> Result<usize> {
+        self.report_tx
+            .send(history)
+            .with_context(|| "failed to send report")
     }
 
     pub async fn receive_endpoint(&self) -> Option<Endpoint> {
-        self.endpoint_rx.lock().await.recv().await
+        let mut shutdown_rx = self.shutdown_rx.clone();
+        let mut guard = self.endpoint_rx.lock().await;
+        tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => {
+                None
+            }
+            result = guard.recv() => {
+                result
+            }
+        }
     }
 
     pub async fn receive_result(&self) -> Option<QueryResult> {
-        self.result_rx.lock().await.recv().await
+        let mut shutdown_rx = self.shutdown_rx.clone();
+        let mut guard = self.result_rx.lock().await;
+        tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => {
+                None
+            }
+            result = guard.recv() => {
+                result
+            }
+        }
     }
 
-    pub async fn receive_report(&mut self) -> Result<EndpointHistory, broadcast::error::RecvError> {
-        self.report_rx.recv().await
+    pub async fn receive_report(&mut self) -> Result<EndpointHistory> {
+        let mut shutdown_rx = self.shutdown_rx.clone();
+        tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => {
+                Err(anyhow!("broker is shutting down, cannot receive report"))
+            }
+            result = self.report_rx.recv() => {
+                result.map_err(anyhow::Error::from)
+            }
+        }
     }
 
     pub fn shutdown(&self) {
