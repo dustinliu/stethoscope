@@ -39,10 +39,14 @@ pub struct QueryResult {
     pub record: QueryRecord,
 }
 
+// Represents the detailed record of a single query attempt.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueryRecord {
+    // The HTTP status code returned by the endpoint.
     pub status: StatusCode,
+    // The timestamp when the query was performed.
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    // The duration the query took to complete.
     pub duration: tokio::time::Duration,
 }
 
@@ -58,9 +62,13 @@ impl std::fmt::Display for QueryRecord {
     }
 }
 
+// Represents the history of recent query attempts for a specific endpoint,
+// particularly focusing on failures.
 #[derive(Debug, Clone)]
 pub struct EndpointHistory {
+    // The endpoint configuration associated with this history.
     pub endpoint: Endpoint,
+    // A vector of recent query records, typically storing consecutive failures.
     pub events: Vec<QueryRecord>,
 }
 

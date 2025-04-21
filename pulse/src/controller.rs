@@ -17,24 +17,26 @@ const TASK_SHUTDOWN_TIMEOUT_SECS: Duration = Duration::from_secs(3);
 const AGGREGATOR_NUM: usize = 1;
 const DISPATCHER_NUM: usize = 1;
 
-/// Controller that manages the URL monitoring system
+/// Controller that manages the URL monitoring system lifecycle.
 ///
-/// Coordinates between agents and workers by:
-/// 1. Managing channels for request distribution and response collection
-/// 2. Spawning and managing agent and worker tasks
-/// 3. Monitoring the health of agents and workers
+/// Responsibilities:
+/// 1. Initializes and holds the central `Broker` instance.
+/// 2. Spawns and manages the lifecycle of agent tasks (Dispatcher, Worker, Aggregator, Reporters).
+/// 3. Listens for termination signals (SIGINT, SIGTERM) to initiate graceful shutdown.
+/// 4. Coordinates the shutdown sequence of all tasks.
 ///
 /// # Fields
-/// * `shutdown_sender` - Channel for sending shutdown signals to all tasks
+/// * `broker` - The central message broker for inter-task communication.
+/// * `config` - Static reference to the application configuration.
 pub struct Controller {
     broker: Option<Broker>,
     config: &'static Config,
 }
 
 impl Controller {
-    /// Creates a new Controller with channels for request and response communication
+    /// Creates a new Controller instance.
     ///
-    /// Initializes channels with a buffer size of 100 for both request and response channels
+    /// Initializes the `Broker` and loads the application configuration.
     pub fn new() -> Self {
         Self {
             broker: Some(Broker::new()),
@@ -42,12 +44,13 @@ impl Controller {
         }
     }
 
-    /// Starts the monitoring system
+    /// Starts the monitoring system and waits for termination signals.
     ///
     /// This method:
-    /// 1. Spawns agent and worker tasks for parallel processing
-    /// 2. Starts monitoring tasks to ensure agents and workers are running
-    /// 3. Continuously receives and processes responses
+    /// 1. Spawns task groups for reporters, aggregators, workers, and dispatchers.
+    /// 2. Waits for SIGINT or SIGTERM.
+    /// 3. Initiates graceful shutdown via the `Broker`.
+    /// 4. Waits for all spawned tasks to complete their shutdown sequence.
     pub async fn start(&mut self) {
         let mut tasks = Vec::new();
         if self.config.reporter.enable_stdout {
@@ -102,6 +105,11 @@ impl Controller {
         // Drop broker after shutdown
     }
 
+    // Spawns a group of tasks for a specific agent type (T).
+    // It creates `num_tasks` instances of the agent using the `task_factory`.
+    // Each agent runs its `run` method in a separate Tokio task.
+    // Returns a `JoinHandle` for a supervisor task that waits for the shutdown
+    // signal and then waits for all individual agent tasks in the group to finish.
     fn run_agent<T, F>(&self, num_tasks: usize, task_factory: F) -> JoinHandle<()>
     where
         T: Runnable + Send + Sync + 'static,
@@ -137,6 +145,8 @@ impl Controller {
         })
     }
 
+    // Waits for a specific task `handle` to shut down, with a given `wait_timeout`.
+    // Logs the outcome (success, error, or timeout).
     async fn wait_for_shutdown<T>(
         wait_timeout: Duration,
         task_name: &str,
@@ -161,7 +171,7 @@ impl Controller {
         }
     }
 
-    /// Add a task group to the tasks vector
+    /// Add a task group supervisor task to the main tasks vector.
     fn add_task_group<T, F>(
         &self,
         tasks: &mut Vec<TaskHandle>,
@@ -179,6 +189,7 @@ impl Controller {
     }
 }
 
+// Holds the name and JoinHandle for a task group supervisor.
 struct TaskHandle {
     name: String,
     handle: JoinHandle<()>,

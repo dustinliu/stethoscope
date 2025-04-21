@@ -7,20 +7,33 @@ use std::fmt;
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast, mpsc, watch};
 
+// The Broker struct acts as a central message hub for different components
+// of the application (controller, agents, reporter). It facilitates communication
+// between these components using asynchronous channels.
 #[derive(Debug)]
 pub struct Broker {
+    // Channel for sending endpoints to be monitored by agents.
     endpoint_tx: mpsc::Sender<Endpoint>,
+    // Channel for receiving endpoints (shared access for multiple agents).
     endpoint_rx: Arc<Mutex<mpsc::Receiver<Endpoint>>>,
+    // Channel for sending query results from agents.
     result_tx: mpsc::Sender<QueryResult>,
+    // Channel for receiving query results (shared access for the controller).
     result_rx: Arc<Mutex<mpsc::Receiver<QueryResult>>>,
+    // Broadcast channel for sending endpoint history reports to reporters.
     report_tx: broadcast::Sender<EndpointHistory>,
+    // Broadcast channel receiver for reporters to get reports.
     report_rx: broadcast::Receiver<EndpointHistory>,
 
+    // Watch channel for broadcasting the shutdown signal.
     shutdown_tx: watch::Sender<bool>,
+    // Watch channel receiver to listen for the shutdown signal.
     shutdown_rx: watch::Receiver<bool>,
 }
 
 impl Broker {
+    // Creates a new Broker instance, initializing all the necessary channels.
+    // Channel buffer sizes and other configurations are taken from the global config.
     pub fn new() -> Self {
         let config = config::instance();
         let (endpoint_tx, endpoint_rx) = mpsc::channel(100);
@@ -44,12 +57,14 @@ impl Broker {
         }
     }
 
-    // Helper method for sending with shutdown check
+    // Internal helper method to send an item through an mpsc channel,
+    // incorporating a check for the shutdown signal.
+    // Returns an error if the channel is closed or if a shutdown is initiated.
     async fn _send_with_shutdown<T>(
         &self,
         sender: &mpsc::Sender<T>,
         item: T,
-        operation_desc: &str,
+        operation_desc: &str, // Description of the operation for error messages.
     ) -> Result<()>
     where
         T: Send + Sync + fmt::Debug + 'static,
@@ -67,7 +82,9 @@ impl Broker {
         Ok(())
     }
 
-    // Helper method for receiving Option with shutdown check
+    // Internal helper method to receive an item from a mutex-protected mpsc receiver,
+    // incorporating a check for the shutdown signal.
+    // Returns None if the channel is closed or if a shutdown is initiated.
     async fn _receive_with_shutdown_option<T>(
         &self,
         receiver_mutex: &Arc<Mutex<mpsc::Receiver<T>>>,
@@ -88,30 +105,42 @@ impl Broker {
         }
     }
 
+    // Sends an endpoint to the agents for monitoring.
+    // Uses the internal helper `_send_with_shutdown` for safety.
     pub async fn send_endpoint(&self, endpoint: Endpoint) -> Result<()> {
         self._send_with_shutdown(&self.endpoint_tx, endpoint, "endpoint")
             .await
     }
 
+    // Sends a query result from an agent to the controller.
+    // Uses the internal helper `_send_with_shutdown` for safety.
     pub async fn send_result(&self, result: QueryResult) -> Result<()> {
         self._send_with_shutdown(&self.result_tx, result, "query result")
             .await
     }
 
+    // Sends an endpoint history report via the broadcast channel.
+    // Returns the number of active receivers that received the report, or an error.
     pub fn send_report(&self, history: EndpointHistory) -> Result<usize> {
         self.report_tx
             .send(history)
             .with_context(|| "failed to send report")
     }
 
+    // Receives an endpoint from the channel for an agent to process.
+    // Returns None if the channel is closed or shutdown is initiated.
     pub async fn receive_endpoint(&self) -> Option<Endpoint> {
         self._receive_with_shutdown_option(&self.endpoint_rx).await
     }
 
+    // Receives a query result from the channel for the controller to process.
+    // Returns None if the channel is closed or shutdown is initiated.
     pub async fn receive_result(&self) -> Option<QueryResult> {
         self._receive_with_shutdown_option(&self.result_rx).await
     }
 
+    // Receives an endpoint history report from the broadcast channel.
+    // Returns an error if the channel lags or if shutdown is initiated.
     pub async fn receive_report(&mut self) -> Result<EndpointHistory> {
         let mut shutdown_rx = self.shutdown_rx.clone();
         tokio::select! {
@@ -125,29 +154,28 @@ impl Broker {
         }
     }
 
+    // Initiates the shutdown process by sending a signal on the watch channel.
+    // Panics if sending the signal fails (which should generally not happen).
     pub fn shutdown(&self) {
         self.shutdown_tx
             .send(true)
             .expect("failed to send shutdown signal");
     }
 
+    // Waits asynchronously until the shutdown signal is received.
+    // Panics if waiting on the watch channel fails.
     pub async fn wait_for_shutdown(&mut self) {
         self.shutdown_rx
             .changed()
             .await
             .expect("failed to wait for shutdown signal");
     }
-
-    pub fn is_shutdown(&self) -> bool {
-        if let Ok(changed) = self.shutdown_rx.has_changed() {
-            changed
-        } else {
-            tracing::error!("failed to check if shutdown signal has changed, shutting down");
-            true
-        }
-    }
 }
 
+// Implements the Clone trait for the Broker.
+// Cloning creates new handles to the existing channels, allowing multiple
+// components to interact with the same Broker instance.
+// Note that the report_rx is subscribed, creating a new independent receiver.
 impl Clone for Broker {
     fn clone(&self) -> Self {
         Self {

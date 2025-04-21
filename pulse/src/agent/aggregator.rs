@@ -8,17 +8,22 @@ use tokio::sync::Mutex;
 /// Prefix for aggregator instance names
 const AGGREGATOR_NAME_PREFIX: &str = "Aggregator";
 
-/// Aggregator responsible for processing monitoring results
+/// Aggregator responsible for processing monitoring results and detecting failure patterns.
 ///
 /// The Aggregator component:
-/// - Receives results from workers
-/// - Processes results and handles retries
-/// - Manages the result processing lifecycle
+/// - Receives `QueryResult`s from workers via the `Broker`.
+/// - Maintains a history of recent query events for each endpoint (`EndpointHistory`).
+/// - If a result is successful, it clears the history for that endpoint.
+/// - If a result indicates a failure, it adds the `QueryRecord` to the history.
+/// - It retains only the most recent `failure_threshold` events in the history.
+/// - If the number of consecutive failures reaches the `failure_threshold`,
+///   it sends an `EndpointHistory` report to the `Broker`'s report channel
+///   and clears the history for that endpoint.
 ///
 /// # Fields
-/// * `name` - Name of the aggregator instance
-/// * `result_receiver` - Channel for receiving results from workers
-/// * `shutdown_receiver` - Receiver for shutdown signals
+/// * `name` - Name of the aggregator instance (e.g., "Aggregator-0").
+/// * `broker` - Cloned `Broker` instance for receiving results and sending reports.
+/// * `pool` - A thread-safe map (`Mutex<HashMap<u32, EndpointHistory>>`) storing the recent event history for each monitored endpoint ID.
 #[derive(Debug)]
 pub struct Aggregator {
     name: String,
@@ -27,12 +32,11 @@ pub struct Aggregator {
 }
 
 impl Aggregator {
-    /// Creates a new Aggregator instance
+    /// Creates a new Aggregator instance.
     ///
     /// # Arguments
-    /// * `id` - Unique identifier for this aggregator
-    /// * `result_receiver` - Channel for receiving results from workers
-    /// * `shutdown_receiver` - Receiver for shutdown signals
+    /// * `id` - Unique identifier for this aggregator instance.
+    /// * `broker` - Cloned `Broker` instance for communication.
     pub fn new(id: usize, broker: Broker) -> Self {
         Self {
             name: format!("{}-{}", AGGREGATOR_NAME_PREFIX, id),
@@ -41,7 +45,8 @@ impl Aggregator {
         }
     }
 
-    /// Helper: retain only the most recent `threshold` events
+    /// Helper function to retain only the most recent `threshold` events in a vector.
+    /// Removes older events from the beginning of the vector if the length exceeds the threshold.
     fn retain_recent_events(events: &mut Vec<QueryRecord>, threshold: usize) {
         if events.len() > threshold {
             let drain_count = events.len() - threshold;
@@ -49,11 +54,17 @@ impl Aggregator {
         }
     }
 
-    /// Continuously receives and processes results from workers
+    /// Processes a single `QueryResult` received from a worker.
     ///
     /// This method:
-    /// 1. Receives results from the worker channel
-    /// 2. Processes each result and logs the outcome
+    /// 1. Locks the history pool.
+    /// 2. Gets or creates the `EndpointHistory` for the result's endpoint ID.
+    /// 3. If the result is successful, clears the history events for that endpoint.
+    /// 4. If the result is a failure:
+    ///    a. Updates the `Endpoint` information in the history (in case it changed).
+    ///    b. Appends the `QueryRecord` to the history events.
+    ///    c. Uses `retain_recent_events` to keep only the last `failure_threshold` events.
+    ///    d. If the number of events now equals `failure_threshold`, sends a report using `broker.send_report` and clears the history events.
     async fn process_results(&self, result: QueryResult) {
         let mut pool = self.pool.lock().await;
         let history = pool.entry(result.endpoint.id).or_insert(EndpointHistory {
@@ -82,18 +93,19 @@ impl Aggregator {
 
 #[async_trait]
 impl Runnable for Aggregator {
+    /// The main loop for the aggregator.
+    /// Continuously receives `QueryResult`s from the broker's result channel.
+    /// For each result, it calls `process_results`.
+    /// The loop terminates when the broker's result channel is closed or a
+    /// shutdown signal is received.
     async fn run(&mut self) {
         while let Some(result) = self.broker.receive_result().await {
             // tracing::trace!("result capacity: {}", self.broker.result_channel_capacity());
             self.process_results(result).await;
-
-            if self.broker.is_shutdown() {
-                break;
-            }
         }
     }
 
-    /// Returns the name of this aggregator instance
+    /// Returns the name of this aggregator instance.
     fn name(&self) -> &str {
         &self.name
     }
@@ -108,34 +120,34 @@ mod tests {
     use reqwest::StatusCode;
     use std::time::Duration;
 
-    /// 測試輔助結構體，封裝常見的測試設置
+    /// Test helper structure, encapsulating common test setup.
     struct TestContext {
         aggregator: Aggregator,
         broker: Broker,
     }
 
     impl TestContext {
-        /// 創建一個新的測試上下文
+        /// Create a new test context.
         fn new() -> Self {
             let broker = Broker::new();
             let aggregator = Aggregator::new(0, broker.clone());
             Self { aggregator, broker }
         }
 
-        /// 處理一個事件並返回 pool 中的歷史記錄
+        /// Process an event and return the history from the pool.
         async fn process_event(&self, event: QueryResult) -> EndpointHistory {
             self.aggregator.process_results(event.clone()).await;
-            // 等待一小段時間，確保報告能夠被發送
+            // Wait a short time to ensure the report can be sent.
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
             let pool = self.aggregator.pool.lock().await;
             pool.get(&event.endpoint.id).unwrap().clone()
         }
 
-        /// 檢查報告是否被發送，使用超時避免永久等待
+        /// Check if a report was sent, using a timeout to avoid indefinite waiting.
         async fn check_report_sent(
             &mut self,
-            should_send: bool,
-            timeout_ms: u64,
+            should_send: bool, // Expected behavior: true if a report should be sent, false otherwise.
+            timeout_ms: u64,   // Timeout duration in milliseconds.
         ) -> Option<EndpointHistory> {
             let timeout_result = tokio::time::timeout(
                 tokio::time::Duration::from_millis(timeout_ms),
@@ -146,26 +158,27 @@ mod tests {
             match timeout_result {
                 Ok(Ok(report)) => {
                     if !should_send {
-                        panic!("報告不應該被發送");
+                        panic!("Report should not have been sent");
                     }
                     Some(report)
                 }
                 Ok(Err(_)) => {
                     if should_send {
-                        panic!("報告應該被發送");
+                        panic!("Report should have been sent but was not");
                     }
                     None
                 }
                 Err(_) => {
+                    // Timeout occurred
                     if should_send {
-                        panic!("報告應該被發送，但超時了");
+                        panic!("Report should have been sent, but timed out");
                     }
                     None
                 }
             }
         }
 
-        /// 檢查 pool 中的事件數量
+        /// Check the number of events in the pool for a specific endpoint ID.
         async fn check_pool_events_count(&self, endpoint_id: u32, expected_count: usize) {
             let pool = self.aggregator.pool.lock().await;
             let history = pool.get(&endpoint_id).unwrap();
@@ -173,6 +186,7 @@ mod tests {
         }
     }
 
+    /// Helper function to create a test Endpoint.
     fn make_endpoint(failure_threshold: u8) -> Endpoint {
         Endpoint {
             id: 0,
@@ -182,6 +196,7 @@ mod tests {
         }
     }
 
+    /// Helper function to create a test QueryResult (event).
     fn make_event(
         endpoint: &Endpoint,
         status: StatusCode,
@@ -197,6 +212,7 @@ mod tests {
         }
     }
 
+    /// Test case: Not enough failures to trigger a report.
     #[tokio::test]
     async fn test_not_enough_failures() {
         let endpoint = make_endpoint(3);
@@ -212,28 +228,29 @@ mod tests {
         for (i, event) in events.iter().enumerate() {
             let history = ctx.process_event(event.clone()).await;
 
-            // 檢查 event 數量
+            // Check event count.
             assert_eq!(history.events.len(), i + 1);
 
-            // 檢查 endpoint 資訊是否正確保存
+            // Check if endpoint information is correctly saved.
             assert_eq!(history.endpoint.id, endpoint.id);
             assert_eq!(history.endpoint.url, endpoint.url);
             assert_eq!(history.endpoint.failure_threshold, endpoint.failure_threshold);
 
-            // 檢查最後一個事件內容是否正確
+            // Check if the last event content is correct.
             if i == 0 {
                 assert_eq!(history.events[0].status, StatusCode::INTERNAL_SERVER_ERROR);
                 assert_eq!(history.events[0].timestamp, now);
             }
         }
 
-        // 最後確認 pool 內仍存在 event（未達到 threshold）
+        // Finally, confirm that events still exist in the pool (threshold not reached).
         ctx.check_pool_events_count(endpoint.id, 1).await;
 
-        // 驗證沒有 report 被送出
+        // Verify that no report was sent.
         ctx.check_report_sent(false, 100).await;
     }
 
+    /// Test case: Enough failures to trigger a report.
     #[tokio::test]
     async fn test_enough_failures() {
         let endpoint = make_endpoint(3);
@@ -255,29 +272,35 @@ mod tests {
         let mut ctx = TestContext::new();
 
         for (i, event) in events.iter().enumerate() {
+            let history = ctx.process_event(event.clone()).await;
+
             if i < 2 {
-                // 前兩個事件送出時不應該有 report
-                let history = ctx.process_event(event.clone()).await;
+                // Before reaching the threshold, events should accumulate.
                 assert_eq!(history.events.len(), i + 1);
-
-                // 確認沒有 report 被送出
-                ctx.check_report_sent(false, 100).await;
             } else {
-                // 第三個事件應該觸發 report
-                ctx.process_event(event.clone()).await;
-
-                // 驗證 report 被送出
-                if let Some(report) = ctx.check_report_sent(true, 100).await {
-                    assert_eq!(report.events.len(), 3);
-                    assert_eq!(report.endpoint.id, endpoint.id);
-                }
-
-                // 檢查 pool 被清空
-                ctx.check_pool_events_count(endpoint.id, 0).await;
+                // Upon reaching the threshold, events should be cleared.
+                assert!(history.events.is_empty());
             }
         }
+
+        // Verify that a report was sent.
+        let report = ctx.check_report_sent(true, 100).await.unwrap();
+
+        // Check report content.
+        assert_eq!(report.endpoint.id, endpoint.id);
+        assert_eq!(report.events.len(), 3);
+        assert_eq!(report.events[0].status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(report.events[0].timestamp, now - ChronoDuration::seconds(120));
+        assert_eq!(report.events[1].status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(report.events[1].timestamp, now - ChronoDuration::seconds(60));
+        assert_eq!(report.events[2].status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(report.events[2].timestamp, now);
+
+        // Check that the pool is empty after the report.
+        ctx.check_pool_events_count(endpoint.id, 0).await;
     }
 
+    /// Test case: Ensure events are stored in the correct order.
     #[tokio::test]
     async fn test_event_order_preserved() {
         let endpoint = make_endpoint(3);
@@ -301,177 +324,139 @@ mod tests {
         for (i, event) in events.iter().enumerate() {
             ctx.process_event(event.clone()).await;
 
-            // 累積到 threshold 就會清空
-            let expected = if i == 2 { 0 } else { i + 1 };
-            ctx.check_pool_events_count(endpoint.id, expected).await;
+            // Check the order of events in the pool.
+            let pool = ctx.aggregator.pool.lock().await;
+            let history = pool.get(&endpoint.id).unwrap();
+            assert_eq!(history.events.len(), i + 1);
+            assert_eq!(history.events[i].status, event.record.status);
+            assert_eq!(history.events[i].timestamp, event.record.timestamp);
         }
     }
 
+    /// Test case: Handling of threshold limits and event overflow.
     #[tokio::test]
     async fn test_threshold_and_overflow_handling() {
-        let endpoint = make_endpoint(2);
+        let endpoint = make_endpoint(2); // Threshold of 2
         let now = Utc::now();
-
         let events = vec![
+            make_event(&endpoint, StatusCode::BAD_GATEWAY, now - ChronoDuration::seconds(3)),
+            make_event(&endpoint, StatusCode::GATEWAY_TIMEOUT, now - ChronoDuration::seconds(2)),
             make_event(
                 &endpoint,
                 StatusCode::INTERNAL_SERVER_ERROR,
-                now - ChronoDuration::seconds(50),
-            ),
-            make_event(
-                &endpoint,
-                StatusCode::INTERNAL_SERVER_ERROR,
-                now - ChronoDuration::seconds(40),
-            ),
-            make_event(
-                &endpoint,
-                StatusCode::INTERNAL_SERVER_ERROR,
-                now - ChronoDuration::seconds(30),
-            ),
-            make_event(
-                &endpoint,
-                StatusCode::INTERNAL_SERVER_ERROR,
-                now - ChronoDuration::seconds(20),
-            ),
-            make_event(
-                &endpoint,
-                StatusCode::INTERNAL_SERVER_ERROR,
-                now - ChronoDuration::seconds(10),
-            ),
+                now - ChronoDuration::seconds(1),
+            ), // This event exceeds the threshold
+            make_event(&endpoint, StatusCode::NOT_FOUND, now), // This should trigger the report
         ];
 
         let mut ctx = TestContext::new();
 
-        // 期望的 pool 長度
-        // 第一輪：1個→0個（達到閾值）
-        // 第二輪：1個→0個（達到閾值）
-        // 第三輪：1個（未達閾值）
-        let expected_pool_lens = [1, 0, 1, 0, 1];
+        // Process the first event.
+        ctx.process_event(events[0].clone()).await;
+        ctx.check_pool_events_count(endpoint.id, 1).await;
+        ctx.check_report_sent(false, 50).await; // No report yet
 
-        // 標記預期會發送報告的事件索引
-        let report_events = [1, 3]; // 第2個和第4個事件（索引 1 和 3）時報告會被發送
+        // Process the second event (reaches threshold).
+        ctx.process_event(events[1].clone()).await;
+        ctx.check_pool_events_count(endpoint.id, 0).await; // Pool cleared after report
+        let report1 = ctx.check_report_sent(true, 50).await.unwrap(); // Report sent
+        assert_eq!(report1.events.len(), 2);
+        assert_eq!(report1.events[0].status, StatusCode::BAD_GATEWAY);
+        assert_eq!(report1.events[1].status, StatusCode::GATEWAY_TIMEOUT);
 
-        for (i, event) in events.iter().enumerate() {
-            // 送入事件
-            ctx.process_event(event.clone()).await;
+        // Process the third event (first after clear).
+        ctx.process_event(events[2].clone()).await;
+        ctx.check_pool_events_count(endpoint.id, 1).await;
+        ctx.check_report_sent(false, 50).await; // No report yet
 
-            // 檢查報告
-            if report_events.contains(&i) {
-                // 此事件應該觸發報告
-                if let Some(report) = ctx.check_report_sent(true, 100).await {
-                    assert_eq!(report.endpoint.id, endpoint.id);
-                    assert_eq!(report.events.len(), 2, "報告應包含 2 個事件");
-
-                    // 檢查事件時間戳順序
-                    assert!(report.events[0].timestamp < report.events[1].timestamp);
-
-                    // 檢查是我們期望的事件
-                    let expected_start = if i == 1 { 0 } else { 2 };
-                    let expected_first_timestamp = events[expected_start].record.timestamp;
-                    assert_eq!(report.events[0].timestamp, expected_first_timestamp);
-                }
-            } else {
-                // 此事件不應該觸發報告
-                ctx.check_report_sent(false, 100).await;
-            }
-
-            // 檢查 pool 長度
-            ctx.check_pool_events_count(endpoint.id, expected_pool_lens[i])
-                .await;
-        }
+        // Process the fourth event (reaches threshold again).
+        ctx.process_event(events[3].clone()).await;
+        ctx.check_pool_events_count(endpoint.id, 0).await; // Pool cleared again
+        let report2 = ctx.check_report_sent(true, 50).await.unwrap(); // Second report sent
+        assert_eq!(report2.events.len(), 2);
+        assert_eq!(report2.events[0].status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(report2.events[1].status, StatusCode::NOT_FOUND);
     }
 
+    /// Test case: Ensures that only failure events are inserted into the history.
     #[tokio::test]
     async fn test_failure_event_being_inserted() {
         let endpoint = make_endpoint(3);
         let now = Utc::now();
-        let events = [
-            make_event(&endpoint, StatusCode::INTERNAL_SERVER_ERROR, now),
-            make_event(&endpoint, StatusCode::INTERNAL_SERVER_ERROR, now),
-            make_event(&endpoint, StatusCode::INTERNAL_SERVER_ERROR, now),
-        ];
+        let success_event = make_event(&endpoint, StatusCode::OK, now - ChronoDuration::seconds(1));
+        let failure_event = make_event(&endpoint, StatusCode::INTERNAL_SERVER_ERROR, now);
 
         let ctx = TestContext::new();
 
-        let expected_pool_lens = [1, 2, 0]; // 累積到 3 個時，清空 pool
-        for (i, event) in events.iter().enumerate() {
-            ctx.process_event(event.clone()).await;
-            ctx.check_pool_events_count(endpoint.id, expected_pool_lens[i])
-                .await;
-        }
+        // Process a success event first.
+        ctx.process_event(success_event).await;
+        ctx.check_pool_events_count(endpoint.id, 0).await; // Should be empty
 
-        assert_eq!(ctx.aggregator.pool.lock().await.len(), 1); // 仍然有一個 endpoint
+        // Process a failure event.
+        ctx.process_event(failure_event).await;
+        ctx.check_pool_events_count(endpoint.id, 1).await; // Should contain the failure
     }
 
+    /// Test case: Verifies that a success event clears existing failure history.
     #[tokio::test]
     async fn test_success_event_clears_history() {
         let endpoint = make_endpoint(3);
         let now = Utc::now();
-        let events = vec![
-            make_event(&endpoint, StatusCode::INTERNAL_SERVER_ERROR, now),
-            make_event(&endpoint, StatusCode::OK, now),
-        ];
+        let failure_event = make_event(
+            &endpoint,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            now - ChronoDuration::seconds(1),
+        );
+        let success_event = make_event(&endpoint, StatusCode::OK, now);
 
-        let ctx = TestContext::new();
+        let mut ctx = TestContext::new();
 
-        for event in events {
-            ctx.process_event(event).await;
-        }
+        // Add a failure event.
+        ctx.process_event(failure_event).await;
+        ctx.check_pool_events_count(endpoint.id, 1).await;
 
-        assert_eq!(ctx.aggregator.pool.lock().await.len(), 1);
-        ctx.check_pool_events_count(endpoint.id, 0).await;
+        // Process a success event.
+        ctx.process_event(success_event).await;
+        ctx.check_pool_events_count(endpoint.id, 0).await; // History should be cleared
+        ctx.check_report_sent(false, 50).await; // No report should be sent
     }
 
+    /// Test case: Ensure endpoint details (like threshold) are updated with new events.
     #[tokio::test]
     async fn test_endpoint_update() {
-        // 創建初始 endpoint
-        let initial_endpoint = Endpoint {
-            id: 0,
-            url: "http://test".to_string(),
-            failure_threshold: 3,
-            timeout: Duration::from_secs(1),
-        };
-
-        // 創建更新後的 endpoint (增加了 failure_threshold)
-        let updated_endpoint = Endpoint {
-            id: 0,
-            url: "http://test".to_string(),
-            failure_threshold: 5, // 從 3 變為 5
-            timeout: Duration::from_secs(1),
-        };
+        let endpoint1 = make_endpoint(3);
+        let mut endpoint2 = endpoint1.clone();
+        endpoint2.failure_threshold = 5; // Change the threshold
+        endpoint2.url = "http://updated-test".to_string(); // Change the URL
 
         let now = Utc::now();
-
-        // 使用初始 endpoint 建立事件
-        let initial_event = make_event(&initial_endpoint, StatusCode::INTERNAL_SERVER_ERROR, now);
-
-        // 使用更新後的 endpoint 建立事件
-        let updated_event = make_event(
-            &updated_endpoint,
+        let event1 = make_event(
+            &endpoint1,
             StatusCode::INTERNAL_SERVER_ERROR,
-            now + ChronoDuration::seconds(10),
+            now - ChronoDuration::seconds(1),
         );
+        let event2 = make_event(&endpoint2, StatusCode::SERVICE_UNAVAILABLE, now);
 
         let ctx = TestContext::new();
 
-        ctx.process_event(initial_event).await;
-
+        // Process event with original endpoint details.
+        ctx.process_event(event1).await;
         {
             let pool = ctx.aggregator.pool.lock().await;
-            let history = pool.get(&initial_endpoint.id).unwrap();
-            assert_eq!(history.endpoint.url, initial_endpoint.url);
+            let history = pool.get(&endpoint1.id).unwrap();
             assert_eq!(history.endpoint.failure_threshold, 3);
-            assert_eq!(history.endpoint.timeout, initial_endpoint.timeout);
+            assert_eq!(history.endpoint.url, "http://test");
+            assert_eq!(history.events.len(), 1);
         }
 
-        ctx.process_event(updated_event).await;
+        // Process event with updated endpoint details.
+        let history_after_update = ctx.process_event(event2).await;
 
-        {
-            let pool = ctx.aggregator.pool.lock().await;
-            let history = pool.get(&initial_endpoint.id).unwrap();
-            assert_eq!(history.endpoint.failure_threshold, 5); // 應該更新為 5
-            assert_eq!(history.endpoint.url, updated_endpoint.url);
-            assert_eq!(history.endpoint.timeout, updated_endpoint.timeout);
-        }
+        // Check if endpoint details in history are updated.
+        assert_eq!(history_after_update.endpoint.failure_threshold, 5);
+        assert_eq!(history_after_update.endpoint.url, "http://updated-test");
+        assert_eq!(history_after_update.events.len(), 2); // Both events should be present
+        assert_eq!(history_after_update.events[0].status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(history_after_update.events[1].status, StatusCode::SERVICE_UNAVAILABLE);
     }
 }

@@ -14,16 +14,16 @@ use async_trait::async_trait;
 /// Prefix for worker instance names
 const WORKER_NAME_PREFIX: &str = "Worker";
 
-/// Worker responsible for processing URL queries asynchronously
+/// Worker responsible for processing URL queries asynchronously.
 ///
-/// The Worker component handles the actual HTTP requests to monitored URLs,
-/// processes responses, and reports results back to the controller.
+/// Receives `Endpoint`s from the `Broker`, performs HTTP GET requests,
+/// handles potential errors (connection, timeout, status codes), and sends
+/// `QueryResult`s back to the `Broker`.
 ///
 /// # Fields
-/// * `name` - Name of the worker instance
-/// * `url_receiver` - Receiver for incoming URL queries
-/// * `result_sender` - Sender to transmit processed query results
-/// * `client` - Shared HTTP client instance for making requests
+/// * `name` - Name of the worker instance (e.g., "Worker-0").
+/// * `broker` - Cloned `Broker` instance for communication.
+/// * `client` - `reqwest::Client` used for making HTTP requests.
 #[derive(Debug)]
 pub struct Worker {
     name: String,
@@ -32,14 +32,12 @@ pub struct Worker {
 }
 
 impl Worker {
-    /// Creates a new Worker instance
+    /// Creates a new Worker instance.
+    /// Initializes the reqwest client with connection pooling disabled.
     ///
     /// # Arguments
-    /// * `id` - Unique identifier for this worker
-    /// * `broker` - Broker instance to use for communication
-    ///
-    /// # Returns
-    /// A new Worker instance with the specified configuration
+    /// * `id` - Unique identifier for this worker instance.
+    /// * `broker` - Cloned `Broker` instance for communication.
     pub fn new(id: usize, broker: Broker) -> Self {
         Self {
             name: format!("{}-{}", WORKER_NAME_PREFIX, id),
@@ -52,20 +50,16 @@ impl Worker {
         }
     }
 
-    /// Process a single endpoint and send the result back
-    ///
-    /// This method:
-    /// 1. Makes an HTTP request to the endpoint URL
-    /// 2. Records the response status and timing
-    /// 3. Sends the result back through the result channel
-    ///
-    /// # Arguments
-    /// * `endpoint` - The endpoint to process
+    /// The main loop for the worker.
+    /// Continuously receives `Endpoint`s from the broker's endpoint channel.
+    /// For each endpoint, it performs an HTTP GET request, records the result
+    /// (status, timestamp, duration), handles errors appropriately (mapping
+    /// reqwest errors to specific status codes like `SERVICE_UNAVAILABLE` or
+    /// `REQUEST_TIMEOUT`), and sends the `QueryResult` back via the broker's
+    /// result channel. The loop terminates when the broker's endpoint channel
+    /// is closed or a shutdown signal is received.
     async fn process_endpoint(&self) {
         while let Some(endpoint) = self.broker.receive_endpoint().await {
-            if self.name == "Worker-0" {
-                tracing::trace!("{} querying endpoint: {}", self.name, endpoint.url);
-            }
             let timestamp = chrono::Utc::now();
             let start_time = tokio::time::Instant::now();
 
@@ -77,19 +71,14 @@ impl Worker {
                 .send()
                 .await
             {
-                Ok(response) => {
-                    if self.name == "Worker-0" {
-                        tracing::trace!("{} received response: {}", self.name, response.status());
-                    }
-                    QueryResult {
-                        endpoint,
-                        record: QueryRecord {
-                            status: response.status(),
-                            timestamp,
-                            duration: start_time.elapsed(),
-                        },
-                    }
-                }
+                Ok(response) => QueryResult {
+                    endpoint,
+                    record: QueryRecord {
+                        status: response.status(),
+                        timestamp,
+                        duration: start_time.elapsed(),
+                    },
+                },
                 Err(e) => {
                     if e.is_connect() {
                         QueryResult {
@@ -131,22 +120,8 @@ impl Worker {
                 }
             };
 
-            if self.name == "Worker-0" {
-                tracing::trace!("{} sending result", self.name);
-            }
             if let Err(e) = self.broker.send_result(result).await {
                 tracing::warn!("Failed to send result: {}", e);
-            }
-            if self.name == "Worker-0" {
-                tracing::trace!("{} result sent", self.name);
-            }
-
-            if self.broker.is_shutdown() {
-                tracing::debug!("{}: Broker is shutdown", self.name);
-                break;
-            }
-            if self.name == "Worker-0" {
-                tracing::trace!("{}: Worker job ended", self.name);
             }
         }
         tracing::trace!("{}: Worker loop ended", self.name);
@@ -155,12 +130,12 @@ impl Worker {
 
 #[async_trait]
 impl Runnable for Worker {
-    /// Starts the worker's endpoint processing loop
+    /// Starts the worker's main processing loop (`process_endpoint`).
     async fn run(&mut self) {
         self.process_endpoint().await;
     }
 
-    /// Returns the name of this worker instance
+    /// Returns the name of this worker instance.
     fn name(&self) -> &str {
         &self.name
     }
@@ -178,15 +153,19 @@ mod tests {
     use pretty_assertions::assert_eq;
     use std::time::Duration;
 
-    /// Runs a worker test with a given mock server configuration
+    /// Runs a worker test with a given mock server configuration.
+    /// Sets up a mock HTTP server (`httptest::Server`) to simulate responses.
+    /// Creates a `Worker` and runs it in a separate task.
+    /// Sends a test `Endpoint` to the worker via the `Broker`.
+    /// Receives the `QueryResult` from the worker via the `Broker`.
     ///
     /// # Arguments
-    /// * `status_code` - HTTP status code to return from the mock server
-    /// * `delay` - Optional delay before sending the response
-    /// * `timeout` - Duration to wait for the response
+    /// * `status_code` - HTTP status code for the mock server to return.
+    /// * `delay` - Optional delay before the mock server sends the response.
+    /// * `timeout` - Request timeout duration for the `Endpoint`.
     ///
     /// # Returns
-    /// A tuple containing the processed query result and the server address
+    /// The `QueryResult` produced by the worker.
     async fn run_worker_test(
         status_code: reqwest::StatusCode,
         delay: Option<Duration>,
@@ -231,7 +210,7 @@ mod tests {
         result
     }
 
-    /// Tests the worker's handling of successful responses
+    /// Tests the worker's handling of successful (200 OK) responses.
     #[tokio::test]
     async fn test_worker_normal() {
         let result = run_worker_test(reqwest::StatusCode::OK, None, Duration::from_secs(5)).await;
@@ -241,7 +220,7 @@ mod tests {
         assert!(result.record.duration.as_secs_f64() > 0.0);
     }
 
-    /// Tests the worker's handling of server errors
+    /// Tests the worker's handling of server-side errors (500 Internal Server Error).
     #[tokio::test]
     async fn test_worker_server_error() {
         let result = run_worker_test(
@@ -255,6 +234,9 @@ mod tests {
         assert!(result.record.duration.as_secs_f64() > 0.0);
     }
 
+    /// Tests the worker's handling of request timeouts.
+    /// Uses a short endpoint timeout and a longer server delay.
+    /// Expects the result status to be `REQUEST_TIMEOUT`.
     #[tokio::test]
     async fn test_worker_timeout_error() {
         let result = run_worker_test(
@@ -267,6 +249,9 @@ mod tests {
         assert_eq!(result.record.status, reqwest::StatusCode::REQUEST_TIMEOUT);
     }
 
+    /// Tests the worker's handling of connection errors.
+    /// Sends a request to a non-existent address.
+    /// Expects the result status to be `SERVICE_UNAVAILABLE`.
     #[tokio::test]
     async fn test_worker_connection_error() {
         // Override the URL to point to a non-existent server
