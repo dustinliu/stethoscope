@@ -1,0 +1,6 @@
+---
+description: when looking for API document
+globs:
+alwaysApply: false
+---
+- use contex7 to looking for API document
