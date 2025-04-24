@@ -27,12 +27,14 @@ impl std::fmt::Display for Endpoint {
     }
 }
 
-/// Represents the result of a single endpoint monitoring attempt
+/// Represents the outcome of a single monitoring check for a specific endpoint.
+///
+/// This struct links the endpoint configuration with the specific result obtained
+/// during a monitoring attempt.
 ///
 /// # Fields
-/// * `status` - HTTP status code of the response
-/// * `timestamp` - When the query was executed
-/// * `duration` - Duration from sending request to receiving response
+/// * `endpoint` - The configuration of the endpoint that was checked.
+/// * `record` - The detailed results of the monitoring attempt (status, timestamp, duration).
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueryResult {
     pub endpoint: Endpoint,

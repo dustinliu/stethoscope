@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Endpoint Management</title>
+    <link rel="stylesheet" href="/static/css/style.css"> <!-- Assuming CSS will be compiled here -->
+</head>
+<body>
+    <header>
+        <h1>Endpoint Management</h1>
+    </header>
+
+    <main>
+        <section id="endpoint-list">
+            <h2>Current Endpoints</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>URL</th>
+                        <th>Method</th>
+                        <th>Failure Threshold</th>
+                        <th>Timeout (ms)</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <!-- Endpoint rows will be added dynamically here -->
+                    <tr>
+                        <td>Example API</td>
+                        <td>/api/v1/example</td>
+                        <td>GET</td>
+                        <td>3</td>
+                        <td>5000</td>
+                        <td><button class="edit-button">Edit</button> <button class="delete-button">Delete</button></td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <section id="add-endpoint-form">
+            <h2>Add New Endpoint</h2>
+            <form>
+                <label for="endpoint-name">Name:</label>
+                <input type="text" id="endpoint-name" name="name" required><br>
+
+                <label for="endpoint-url">URL:</label>
+                <input type="text" id="endpoint-url" name="url" required><br>
+
+                <label for="endpoint-method">Method:</label>
+                <select id="endpoint-method" name="method">
+                    <option value="GET">GET</option>
+                    <option value="POST">POST</option>
+                    <option value="PUT">PUT</option>
+                    <option value="DELETE">DELETE</option>
+                    <option value="PATCH">PATCH</option>
+                </select><br>
+
+                <label for="endpoint-threshold">Failure Threshold:</label>
+                <input type="number" id="endpoint-threshold" name="failure_threshold" required min="1" value="3"><br>
+
+                <label for="endpoint-timeout">Timeout (ms):</label>
+                <input type="number" id="endpoint-timeout" name="timeout_ms" required min="100" step="100" value="5000"><br>
+
+                <button type="submit">Add Endpoint</button>
+            </form>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2024 Stethoscope</p>
+    </footer>
+
+    <!-- Add script links here if needed -->
+</body>
+</html>

@@ -3,8 +3,7 @@ use crate::{
     message::{Endpoint, EndpointHistory, QueryResult},
 };
 use anyhow::{Context, Result, anyhow, bail};
-use std::fmt;
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 use tokio::sync::{Mutex, broadcast, mpsc, watch};
 
 // The Broker struct acts as a central message hub for different components
@@ -188,5 +187,112 @@ impl Clone for Broker {
             shutdown_tx: self.shutdown_tx.clone(),
             shutdown_rx: self.shutdown_tx.subscribe(),
         }
+    }
+}
+
+struct EnddpointSender {
+    endpoint_tx: mpsc::Sender<Endpoint>,
+}
+
+impl EnddpointSender {
+    fn new(endpoint_tx: &mpsc::Sender<Endpoint>) -> Self {
+        Self {
+            endpoint_tx: endpoint_tx.clone(),
+        }
+    }
+
+    async fn send(&self, endpoint: Endpoint) -> Result<()> {
+        self.endpoint_tx
+            .send(endpoint)
+            .await
+            .with_context(|| "failed to send endpoint")
+    }
+}
+
+struct EndpointReceiver {
+    endpoint_rx: Arc<Mutex<mpsc::Receiver<Endpoint>>>,
+}
+
+impl EndpointReceiver {
+    fn new(endpoint_rx: &Arc<Mutex<mpsc::Receiver<Endpoint>>>) -> Self {
+        Self {
+            endpoint_rx: endpoint_rx.clone(),
+        }
+    }
+
+    async fn receive(&self) -> Option<Endpoint> {
+        self.endpoint_rx.lock().await.recv().await
+    }
+}
+
+struct ResultSender {
+    result_tx: mpsc::Sender<QueryResult>,
+}
+
+impl ResultSender {
+    fn new(result_tx: &mpsc::Sender<QueryResult>) -> Self {
+        Self {
+            result_tx: result_tx.clone(),
+        }
+    }
+
+    async fn send(&self, result: QueryResult) -> Result<()> {
+        self.result_tx
+            .send(result)
+            .await
+            .with_context(|| "failed to send QueryResult")
+    }
+}
+
+struct ResultReceiver {
+    result_rx: Arc<Mutex<mpsc::Receiver<QueryResult>>>,
+}
+
+impl ResultReceiver {
+    fn new(result_rx: &Arc<Mutex<mpsc::Receiver<QueryResult>>>) -> Self {
+        Self {
+            result_rx: result_rx.clone(),
+        }
+    }
+
+    async fn receive(&self) -> Option<QueryResult> {
+        self.result_rx.lock().await.recv().await
+    }
+}
+
+struct ReportSender {
+    report_tx: broadcast::Sender<EndpointHistory>,
+}
+
+impl ReportSender {
+    fn new(report_tx: &broadcast::Sender<EndpointHistory>) -> Self {
+        Self {
+            report_tx: report_tx.clone(),
+        }
+    }
+
+    async fn send(&self, history: EndpointHistory) -> Result<usize> {
+        self.report_tx
+            .send(history)
+            .with_context(|| "failed to send report")
+    }
+}
+
+struct ReportReceiver {
+    report_rx: broadcast::Receiver<EndpointHistory>,
+}
+
+impl ReportReceiver {
+    fn new(report_tx: &broadcast::Sender<EndpointHistory>) -> Self {
+        Self {
+            report_rx: report_tx.subscribe(),
+        }
+    }
+
+    async fn receive(&mut self) -> Result<EndpointHistory> {
+        self.report_rx
+            .recv()
+            .await
+            .with_context(|| "failed to receive report")
     }
 }
