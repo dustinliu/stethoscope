@@ -1,8 +1,7 @@
-/// Task module for the Pulse URL monitoring system
-///
-/// This module defines the Runnable trait which is implemented by all
-/// components that need to run asynchronously in the system.
+use crate::broker::Broker;
+use anyhow::Result;
 use async_trait::async_trait;
+use std::sync::Weak;
 
 /// Trait for components that can be run asynchronously
 ///
@@ -13,7 +12,9 @@ use async_trait::async_trait;
 /// * `start` - Begins the asynchronous execution of the component
 /// * `name` - Returns the name identifier of the component
 #[async_trait]
-pub trait Runnable {
+pub trait Runnable: Sized {
+    fn new(id: usize, broker: Weak<Broker>) -> Result<Self>;
+
     /// Starts the asynchronous execution of the component
     async fn run(&mut self);
 

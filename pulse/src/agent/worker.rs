@@ -1,15 +1,11 @@
-/// Worker module for the Pulse URL monitoring system
-///
-/// This module implements the Worker component which is responsible for:
-/// 1. Processing URL monitoring requests by making HTTP requests
-/// 2. Handling various HTTP response scenarios (success, error, timeout)
-/// 3. Reporting results back to the controller
 use crate::{
-    broker::Broker,
-    message::{QueryRecord, QueryResult},
+    broker::{Broker, EndpointReceiver, ResultSender},
+    message::{Endpoint, QueryRecord, QueryResult},
     runnable::Runnable,
 };
+use anyhow::{Context, Result};
 use async_trait::async_trait;
+use std::sync::Weak;
 
 /// Prefix for worker instance names
 const WORKER_NAME_PREFIX: &str = "Worker";
@@ -24,32 +20,14 @@ const WORKER_NAME_PREFIX: &str = "Worker";
 /// * `name` - Name of the worker instance (e.g., "Worker-0").
 /// * `broker` - Cloned `Broker` instance for communication.
 /// * `client` - `reqwest::Client` used for making HTTP requests.
-#[derive(Debug)]
 pub struct Worker {
     name: String,
-    broker: Broker,
+    endpoint_rx: EndpointReceiver,
+    result_tx: ResultSender,
     client: reqwest::Client,
 }
 
 impl Worker {
-    /// Creates a new Worker instance.
-    /// Initializes the reqwest client with connection pooling disabled.
-    ///
-    /// # Arguments
-    /// * `id` - Unique identifier for this worker instance.
-    /// * `broker` - Cloned `Broker` instance for communication.
-    pub fn new(id: usize, broker: Broker) -> Self {
-        Self {
-            name: format!("{}-{}", WORKER_NAME_PREFIX, id),
-            broker,
-            client: reqwest::ClientBuilder::new()
-                .pool_max_idle_per_host(0) // Disable keeping idle connections
-                .pool_idle_timeout(std::time::Duration::from_secs(0)) // Set idle timeout to 0
-                .build()
-                .expect("Failed to build reqwest client"),
-        }
-    }
-
     /// The main loop for the worker.
     /// Continuously receives `Endpoint`s from the broker's endpoint channel.
     /// For each endpoint, it performs an HTTP GET request, records the result
@@ -58,81 +36,109 @@ impl Worker {
     /// `REQUEST_TIMEOUT`), and sends the `QueryResult` back via the broker's
     /// result channel. The loop terminates when the broker's endpoint channel
     /// is closed or a shutdown signal is received.
-    async fn process_endpoint(&self) {
-        while let Some(endpoint) = self.broker.receive_endpoint().await {
-            let timestamp = chrono::Utc::now();
-            let start_time = tokio::time::Instant::now();
+    async fn process_endpoint(&mut self, endpoint: Endpoint) {
+        let timestamp = chrono::Utc::now();
+        let start_time = tokio::time::Instant::now();
 
-            let result = match self
-                .client
-                .get(&endpoint.url)
-                .timeout(endpoint.timeout)
-                .header(reqwest::header::CONNECTION, "close")
-                .send()
-                .await
-            {
-                Ok(response) => QueryResult {
-                    endpoint,
-                    record: QueryRecord {
-                        status: response.status(),
-                        timestamp,
-                        duration: start_time.elapsed(),
-                    },
+        let result = match self
+            .client
+            .get(&endpoint.url)
+            .timeout(endpoint.timeout)
+            .header(reqwest::header::CONNECTION, "close")
+            .send()
+            .await
+        {
+            Ok(response) => QueryResult {
+                endpoint,
+                record: QueryRecord {
+                    status: response.status(),
+                    timestamp,
+                    duration: start_time.elapsed(),
                 },
-                Err(e) => {
-                    if e.is_connect() {
-                        QueryResult {
-                            endpoint,
-                            record: QueryRecord {
-                                status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
-                                timestamp,
-                                duration: start_time.elapsed(),
-                            },
-                        }
-                    } else if e.is_timeout() {
-                        QueryResult {
-                            endpoint,
-                            record: QueryRecord {
-                                status: reqwest::StatusCode::REQUEST_TIMEOUT,
-                                timestamp,
-                                duration: start_time.elapsed(),
-                            },
-                        }
-                    } else if e.is_status() {
-                        QueryResult {
-                            endpoint,
-                            record: QueryRecord {
-                                status: e.status().unwrap(),
-                                timestamp,
-                                duration: start_time.elapsed(),
-                            },
-                        }
-                    } else {
-                        QueryResult {
-                            endpoint,
-                            record: QueryRecord {
-                                status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-                                timestamp,
-                                duration: start_time.elapsed(),
-                            },
-                        }
+            },
+            Err(e) => {
+                if e.is_connect() {
+                    QueryResult {
+                        endpoint,
+                        record: QueryRecord {
+                            status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                            timestamp,
+                            duration: start_time.elapsed(),
+                        },
+                    }
+                } else if e.is_timeout() {
+                    QueryResult {
+                        endpoint,
+                        record: QueryRecord {
+                            status: reqwest::StatusCode::REQUEST_TIMEOUT,
+                            timestamp,
+                            duration: start_time.elapsed(),
+                        },
+                    }
+                } else if e.is_status() {
+                    QueryResult {
+                        endpoint,
+                        record: QueryRecord {
+                            status: e.status().unwrap(),
+                            timestamp,
+                            duration: start_time.elapsed(),
+                        },
+                    }
+                } else {
+                    QueryResult {
+                        endpoint,
+                        record: QueryRecord {
+                            status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                            timestamp,
+                            duration: start_time.elapsed(),
+                        },
                     }
                 }
-            };
-
-            if let Err(e) = self.broker.send_result(result).await {
-                tracing::warn!("Failed to send result: {}", e);
             }
+        };
+
+        if let Err(e) = self.result_tx.send(result).await {
+            tracing::warn!("Failed to send result: {}", e);
         }
-        tracing::trace!("{}: Worker loop ended", self.name);
     }
 }
 
 #[async_trait]
 impl Runnable for Worker {
+    fn new(id: usize, broker: Weak<Broker>) -> Result<Self> {
+        if let Some(broker) = broker.upgrade() {
+            Ok(Self {
+                name: format!("{}-{}", WORKER_NAME_PREFIX, id),
+                endpoint_rx: broker.register_endpoint_receiver(),
+                result_tx: broker.register_result_sender(),
+                client: reqwest::ClientBuilder::new()
+                    .pool_max_idle_per_host(0) // Disable keeping idle connections
+                    .pool_idle_timeout(std::time::Duration::from_secs(0)) // Set idle timeout to 0
+                    .build()
+                    .with_context(|| "Failed to build reqwest client {}")?,
+            })
+        } else {
+            Err(anyhow::anyhow!("Broker is not alive"))
+        }
+    }
+
     /// Starts the worker's main processing loop (`process_endpoint`).
     async fn run(&mut self) {
-        self.process_endpoint().await;
+        loop {
+            tokio::select! {
+                Some(endpoint) = self.endpoint_rx.receive() => {
+                    self.process_endpoint(endpoint).await;
+                }
+                _ = self.result_tx.is_shutdown() => {
+                    tracing::info!("{}: Shutdown signal received", self.name);
+                    break;
+                }
+                else => {
+                    tracing::info!("{}: Endpoint channel closed, shutting down.", self.name);
+                    break;
+                }
+            }
+        }
     }
 
     /// Returns the name of this worker instance.
@@ -151,7 +157,7 @@ mod tests {
         responders::{self},
     };
     use pretty_assertions::assert_eq;
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     /// Runs a worker test with a given mock server configuration.
     /// Sets up a mock HTTP server (`httptest::Server`) to simulate responses.
@@ -187,8 +193,9 @@ mod tests {
 
         server.expect(expectation);
 
-        let broker = Broker::new();
-        let mut worker = Worker::new(0, broker.clone());
+        let broker = Arc::new(Broker::new());
+        let mut worker =
+            Worker::new(0, Arc::downgrade(&broker)).expect("Failed to create worker for test");
 
         let worker_handle = tokio::spawn(async move {
             worker.run().await;
@@ -201,8 +208,12 @@ mod tests {
             failure_threshold: 3,
         };
 
-        broker.send_endpoint(endpoint).await.unwrap();
-        let result = broker.receive_result().await.unwrap();
+        broker
+            .register_endpoint_sender()
+            .send(endpoint)
+            .await
+            .unwrap();
+        let result = broker.register_result_receiver().receive().await.unwrap();
 
         worker_handle.abort();
 
@@ -262,15 +273,20 @@ mod tests {
             failure_threshold: 3,
         };
 
-        let broker = Broker::new();
-        let mut worker = Worker::new(0, broker.clone());
+        let broker = Arc::new(Broker::new());
+        let mut worker = Worker::new(0, Arc::downgrade(&broker))
+            .expect("Failed to create worker for connection error test");
 
         let worker_handle = tokio::spawn(async move {
             worker.run().await;
         });
 
-        broker.send_endpoint(endpoint).await.unwrap();
-        let result = broker.receive_result().await.unwrap();
+        broker
+            .register_endpoint_sender()
+            .send(endpoint)
+            .await
+            .unwrap();
+        let result = broker.register_result_receiver().receive().await.unwrap();
 
         worker_handle.abort();
 

@@ -1,8 +1,11 @@
-use crate::broker::Broker;
-use crate::message::{EndpointHistory, QueryRecord, QueryResult};
-use crate::runnable::Runnable;
+use crate::{
+    broker::{Broker, ReportSender, ResultReceiver},
+    message::{EndpointHistory, QueryRecord, QueryResult},
+    runnable::Runnable,
+};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Weak};
 use tokio::sync::Mutex;
 
 /// Prefix for aggregator instance names
@@ -22,29 +25,17 @@ const AGGREGATOR_NAME_PREFIX: &str = "Aggregator";
 ///
 /// # Fields
 /// * `name` - Name of the aggregator instance (e.g., "Aggregator-0").
-/// * `broker` - Cloned `Broker` instance for receiving results and sending reports.
+/// * `result_rx` - Receiver for QueryResults from the Broker.
+/// * `report_tx` - Sender for EndpointHistory reports to the Broker.
 /// * `pool` - A thread-safe map (`Mutex<HashMap<u32, EndpointHistory>>`) storing the recent event history for each monitored endpoint ID.
-#[derive(Debug)]
 pub struct Aggregator {
     name: String,
-    broker: Broker,
+    result_rx: ResultReceiver,
+    report_tx: ReportSender,
     pool: Mutex<HashMap<u32, EndpointHistory>>,
 }
 
 impl Aggregator {
-    /// Creates a new Aggregator instance.
-    ///
-    /// # Arguments
-    /// * `id` - Unique identifier for this aggregator instance.
-    /// * `broker` - Cloned `Broker` instance for communication.
-    pub fn new(id: usize, broker: Broker) -> Self {
-        Self {
-            name: format!("{}-{}", AGGREGATOR_NAME_PREFIX, id),
-            broker,
-            pool: Mutex::new(HashMap::new()),
-        }
-    }
-
     /// Helper function to retain only the most recent `threshold` events in a vector.
     /// Removes older events from the beginning of the vector if the length exceeds the threshold.
     fn retain_recent_events(events: &mut Vec<QueryRecord>, threshold: usize) {
@@ -64,7 +55,7 @@ impl Aggregator {
     ///    a. Updates the `Endpoint` information in the history (in case it changed).
     ///    b. Appends the `QueryRecord` to the history events.
     ///    c. Uses `retain_recent_events` to keep only the last `failure_threshold` events.
-    ///    d. If the number of events now equals `failure_threshold`, sends a report using `broker.send_report` and clears the history events.
+    ///    d. If the number of events now equals `failure_threshold`, sends a report using `report_tx` and clears the history events.
     async fn process_results(&self, result: QueryResult) {
         let mut pool = self.pool.lock().await;
         let history = pool.entry(result.endpoint.id).or_insert(EndpointHistory {
@@ -85,7 +76,9 @@ impl Aggregator {
         Self::retain_recent_events(&mut history.events, threshold);
 
         if history.events.len() == threshold {
-            let _ = self.broker.send_report(history.clone());
+            if let Err(e) = self.report_tx.send(history.clone()) {
+                tracing::warn!("{}: Failed to send report: {}", self.name, e);
+            }
             history.events.clear();
         }
     }
@@ -93,15 +86,40 @@ impl Aggregator {
 
 #[async_trait]
 impl Runnable for Aggregator {
+    /// Creates a new Aggregator instance, compatible with the Runnable trait.
+    fn new(id: usize, broker: Weak<Broker>) -> Result<Self> {
+        if let Some(broker) = broker.upgrade() {
+            Ok(Self {
+                name: format!("{}-{}", AGGREGATOR_NAME_PREFIX, id),
+                result_rx: broker.register_result_receiver(),
+                report_tx: broker.register_report_sender(),
+                pool: Mutex::new(HashMap::new()),
+            })
+        } else {
+            Err(anyhow::anyhow!("Broker is not alive"))
+        }
+    }
+
     /// The main loop for the aggregator.
     /// Continuously receives `QueryResult`s from the broker's result channel.
     /// For each result, it calls `process_results`.
     /// The loop terminates when the broker's result channel is closed or a
     /// shutdown signal is received.
     async fn run(&mut self) {
-        while let Some(result) = self.broker.receive_result().await {
-            // tracing::trace!("result capacity: {}", self.broker.result_channel_capacity());
-            self.process_results(result).await;
+        loop {
+            tokio::select! {
+                Some(result) = self.result_rx.receive() => {
+                    self.process_results(result).await;
+                }
+                _ = self.report_tx.is_shutdown() => {
+                    tracing::info!("{}: Report channel closed, shutting down.", self.name);
+                    break;
+                }
+                else => {
+                    tracing::info!("{}: Result channel closed, shutting down.", self.name);
+                    break;
+                }
+            }
         }
     }
 
@@ -114,44 +132,57 @@ impl Runnable for Aggregator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{Endpoint, QueryRecord, QueryResult};
+    use crate::{
+        broker::{Broker, ReportReceiver},
+        message::{Endpoint, QueryRecord, QueryResult},
+    };
     use chrono::{Duration as ChronoDuration, Utc};
     use pretty_assertions::assert_eq;
     use reqwest::StatusCode;
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     /// Test helper structure, encapsulating common test setup.
     struct TestContext {
         aggregator: Aggregator,
-        broker: Broker,
+        report_rx: ReportReceiver,
     }
 
     impl TestContext {
         /// Create a new test context.
         fn new() -> Self {
-            let broker = Broker::new();
-            let aggregator = Aggregator::new(0, broker.clone());
-            Self { aggregator, broker }
+            let broker = Arc::new(Broker::new());
+            let report_rx = broker.register_report_receiver();
+            let aggregator = Aggregator::new(0, Arc::downgrade(&broker))
+                .expect("Failed to create aggregator for test");
+
+            Self {
+                aggregator,
+                report_rx,
+            }
         }
 
         /// Process an event and return the history from the pool.
-        async fn process_event(&self, event: QueryResult) -> EndpointHistory {
+        async fn process_event(&mut self, event: QueryResult) -> EndpointHistory {
             self.aggregator.process_results(event.clone()).await;
-            // Wait a short time to ensure the report can be sent.
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
             let pool = self.aggregator.pool.lock().await;
-            pool.get(&event.endpoint.id).unwrap().clone()
+            pool.get(&event.endpoint.id)
+                .cloned()
+                .unwrap_or_else(|| EndpointHistory {
+                    endpoint: event.endpoint.clone(),
+                    events: Vec::new(),
+                })
         }
 
         /// Check if a report was sent, using a timeout to avoid indefinite waiting.
         async fn check_report_sent(
             &mut self,
-            should_send: bool, // Expected behavior: true if a report should be sent, false otherwise.
-            timeout_ms: u64,   // Timeout duration in milliseconds.
+            should_send: bool,
+            timeout_ms: u64,
         ) -> Option<EndpointHistory> {
             let timeout_result = tokio::time::timeout(
                 tokio::time::Duration::from_millis(timeout_ms),
-                self.broker.receive_report(),
+                self.report_rx.receive(),
             )
             .await;
 
@@ -162,14 +193,13 @@ mod tests {
                     }
                     Some(report)
                 }
-                Ok(Err(_)) => {
+                Ok(Err(_e)) => {
                     if should_send {
-                        panic!("Report should have been sent but was not");
+                        panic!("Report should have been sent, but receive failed/channel closed");
                     }
                     None
                 }
                 Err(_) => {
-                    // Timeout occurred
                     if should_send {
                         panic!("Report should have been sent, but timed out");
                     }
@@ -181,8 +211,8 @@ mod tests {
         /// Check the number of events in the pool for a specific endpoint ID.
         async fn check_pool_events_count(&self, endpoint_id: u32, expected_count: usize) {
             let pool = self.aggregator.pool.lock().await;
-            let history = pool.get(&endpoint_id).unwrap();
-            assert_eq!(history.events.len(), expected_count);
+            let history = pool.get(&endpoint_id);
+            assert_eq!(history.map_or(0, |h| h.events.len()), expected_count);
         }
     }
 
@@ -228,25 +258,20 @@ mod tests {
         for (i, event) in events.iter().enumerate() {
             let history = ctx.process_event(event.clone()).await;
 
-            // Check event count.
             assert_eq!(history.events.len(), i + 1);
 
-            // Check if endpoint information is correctly saved.
             assert_eq!(history.endpoint.id, endpoint.id);
             assert_eq!(history.endpoint.url, endpoint.url);
             assert_eq!(history.endpoint.failure_threshold, endpoint.failure_threshold);
 
-            // Check if the last event content is correct.
             if i == 0 {
                 assert_eq!(history.events[0].status, StatusCode::INTERNAL_SERVER_ERROR);
                 assert_eq!(history.events[0].timestamp, now);
             }
         }
 
-        // Finally, confirm that events still exist in the pool (threshold not reached).
         ctx.check_pool_events_count(endpoint.id, 1).await;
 
-        // Verify that no report was sent.
         ctx.check_report_sent(false, 100).await;
     }
 
@@ -275,18 +300,14 @@ mod tests {
             let history = ctx.process_event(event.clone()).await;
 
             if i < 2 {
-                // Before reaching the threshold, events should accumulate.
                 assert_eq!(history.events.len(), i + 1);
             } else {
-                // Upon reaching the threshold, events should be cleared.
                 assert!(history.events.is_empty());
             }
         }
 
-        // Verify that a report was sent.
         let report = ctx.check_report_sent(true, 100).await.unwrap();
 
-        // Check report content.
         assert_eq!(report.endpoint.id, endpoint.id);
         assert_eq!(report.events.len(), 3);
         assert_eq!(report.events[0].status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -296,16 +317,14 @@ mod tests {
         assert_eq!(report.events[2].status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(report.events[2].timestamp, now);
 
-        // Check that the pool is empty after the report.
         ctx.check_pool_events_count(endpoint.id, 0).await;
     }
 
     /// Test case: Ensure events are stored in the correct order (before threshold).
     #[tokio::test]
     async fn test_event_order_preserved() {
-        let endpoint = make_endpoint(3); // Threshold is 3
+        let endpoint = make_endpoint(3);
         let now = Utc::now();
-        // Only create 2 events, less than the threshold
         let events = [
             make_event(
                 &endpoint,
@@ -317,32 +336,26 @@ mod tests {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 now - ChronoDuration::seconds(20),
             ),
-            // Removed the third event to stay below threshold
         ];
 
-        let ctx = TestContext::new(); // No need for mut ctx anymore
-        // Removed threshold variable as it's not needed in the simplified logic
+        let mut ctx = TestContext::new();
 
         for (i, event) in events.iter().enumerate() {
             ctx.process_event(event.clone()).await;
 
-            // Original check: Directly check the pool as threshold is not reached.
             let pool = ctx.aggregator.pool.lock().await;
             let history = pool.get(&endpoint.id).unwrap();
             assert_eq!(history.events.len(), i + 1);
             assert_eq!(history.events[i].status, event.record.status);
             assert_eq!(history.events[i].timestamp, event.record.timestamp);
-            // Removed the complex if/else logic and report checking
         }
-        // Optional: Add a final check that no report was sent
-        // let mut ctx_mut = ctx; // Need mutability for check_report_sent
-        // ctx_mut.check_report_sent(false, 50).await;
+        ctx.check_report_sent(false, 50).await;
     }
 
     /// Test case: Handling of threshold limits and event overflow.
     #[tokio::test]
     async fn test_threshold_and_overflow_handling() {
-        let endpoint = make_endpoint(2); // Threshold of 2
+        let endpoint = make_endpoint(2);
         let now = Utc::now();
         let events = vec![
             make_event(&endpoint, StatusCode::BAD_GATEWAY, now - ChronoDuration::seconds(3)),
@@ -351,34 +364,30 @@ mod tests {
                 &endpoint,
                 StatusCode::INTERNAL_SERVER_ERROR,
                 now - ChronoDuration::seconds(1),
-            ), // This event exceeds the threshold
-            make_event(&endpoint, StatusCode::NOT_FOUND, now), // This should trigger the report
+            ),
+            make_event(&endpoint, StatusCode::NOT_FOUND, now),
         ];
 
         let mut ctx = TestContext::new();
 
-        // Process the first event.
         ctx.process_event(events[0].clone()).await;
         ctx.check_pool_events_count(endpoint.id, 1).await;
-        ctx.check_report_sent(false, 50).await; // No report yet
+        ctx.check_report_sent(false, 50).await;
 
-        // Process the second event (reaches threshold).
         ctx.process_event(events[1].clone()).await;
-        ctx.check_pool_events_count(endpoint.id, 0).await; // Pool cleared after report
-        let report1 = ctx.check_report_sent(true, 50).await.unwrap(); // Report sent
+        ctx.check_pool_events_count(endpoint.id, 0).await;
+        let report1 = ctx.check_report_sent(true, 50).await.unwrap();
         assert_eq!(report1.events.len(), 2);
         assert_eq!(report1.events[0].status, StatusCode::BAD_GATEWAY);
         assert_eq!(report1.events[1].status, StatusCode::GATEWAY_TIMEOUT);
 
-        // Process the third event (first after clear).
         ctx.process_event(events[2].clone()).await;
         ctx.check_pool_events_count(endpoint.id, 1).await;
-        ctx.check_report_sent(false, 50).await; // No report yet
+        ctx.check_report_sent(false, 50).await;
 
-        // Process the fourth event (reaches threshold again).
         ctx.process_event(events[3].clone()).await;
-        ctx.check_pool_events_count(endpoint.id, 0).await; // Pool cleared again
-        let report2 = ctx.check_report_sent(true, 50).await.unwrap(); // Second report sent
+        ctx.check_pool_events_count(endpoint.id, 0).await;
+        let report2 = ctx.check_report_sent(true, 50).await.unwrap();
         assert_eq!(report2.events.len(), 2);
         assert_eq!(report2.events[0].status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(report2.events[1].status, StatusCode::NOT_FOUND);
@@ -392,15 +401,13 @@ mod tests {
         let success_event = make_event(&endpoint, StatusCode::OK, now - ChronoDuration::seconds(1));
         let failure_event = make_event(&endpoint, StatusCode::INTERNAL_SERVER_ERROR, now);
 
-        let ctx = TestContext::new();
+        let mut ctx = TestContext::new();
 
-        // Process a success event first.
         ctx.process_event(success_event).await;
-        ctx.check_pool_events_count(endpoint.id, 0).await; // Should be empty
+        ctx.check_pool_events_count(endpoint.id, 0).await;
 
-        // Process a failure event.
         ctx.process_event(failure_event).await;
-        ctx.check_pool_events_count(endpoint.id, 1).await; // Should contain the failure
+        ctx.check_pool_events_count(endpoint.id, 1).await;
     }
 
     /// Test case: Verifies that a success event clears existing failure history.
@@ -417,14 +424,12 @@ mod tests {
 
         let mut ctx = TestContext::new();
 
-        // Add a failure event.
         ctx.process_event(failure_event).await;
         ctx.check_pool_events_count(endpoint.id, 1).await;
 
-        // Process a success event.
         ctx.process_event(success_event).await;
-        ctx.check_pool_events_count(endpoint.id, 0).await; // History should be cleared
-        ctx.check_report_sent(false, 50).await; // No report should be sent
+        ctx.check_pool_events_count(endpoint.id, 0).await;
+        ctx.check_report_sent(false, 50).await;
     }
 
     /// Test case: Ensure endpoint details (like threshold) are updated with new events.
@@ -432,8 +437,8 @@ mod tests {
     async fn test_endpoint_update() {
         let endpoint1 = make_endpoint(3);
         let mut endpoint2 = endpoint1.clone();
-        endpoint2.failure_threshold = 5; // Change the threshold
-        endpoint2.url = "http://updated-test".to_string(); // Change the URL
+        endpoint2.failure_threshold = 5;
+        endpoint2.url = "http://updated-test".to_string();
 
         let now = Utc::now();
         let event1 = make_event(
@@ -443,9 +448,8 @@ mod tests {
         );
         let event2 = make_event(&endpoint2, StatusCode::SERVICE_UNAVAILABLE, now);
 
-        let ctx = TestContext::new();
+        let mut ctx = TestContext::new();
 
-        // Process event with original endpoint details.
         ctx.process_event(event1).await;
         {
             let pool = ctx.aggregator.pool.lock().await;
@@ -455,13 +459,11 @@ mod tests {
             assert_eq!(history.events.len(), 1);
         }
 
-        // Process event with updated endpoint details.
         let history_after_update = ctx.process_event(event2).await;
 
-        // Check if endpoint details in history are updated.
         assert_eq!(history_after_update.endpoint.failure_threshold, 5);
         assert_eq!(history_after_update.endpoint.url, "http://updated-test");
-        assert_eq!(history_after_update.events.len(), 2); // Both events should be present
+        assert_eq!(history_after_update.events.len(), 2);
         assert_eq!(history_after_update.events[0].status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(history_after_update.events[1].status, StatusCode::SERVICE_UNAVAILABLE);
     }

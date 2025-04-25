@@ -1,8 +1,9 @@
 use crate::{
     config,
+    error::BrokerError,
     message::{Endpoint, EndpointHistory, QueryResult},
 };
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use std::{fmt, sync::Arc};
 use tokio::sync::{Mutex, broadcast, mpsc, watch};
 
@@ -56,243 +57,200 @@ impl Broker {
         }
     }
 
-    // Internal helper method to send an item through an mpsc channel,
-    // incorporating a check for the shutdown signal.
-    // Returns an error if the channel is closed or if a shutdown is initiated.
-    async fn _send_with_shutdown<T>(
-        &self,
-        sender: &mpsc::Sender<T>,
-        item: T,
-        operation_desc: &str, // Description of the operation for error messages.
-    ) -> Result<()>
-    where
-        T: Send + Sync + fmt::Debug + 'static,
-    {
-        let item_desc = format!("{:?}", item);
-        let mut shutdown_rx = self.shutdown_rx.clone();
-        tokio::select! {
-            result = sender.send(item) => {
-                result.with_context(|| format!("failed to send {}: {}", operation_desc, item_desc))?
-            },
-            _ = shutdown_rx.changed() => {
-                bail!("broker is shutting down, cannot send {}: {}", operation_desc, item_desc);
-            }
-        }
-        Ok(())
+    pub fn register_endpoint_sender(&self) -> EndpointSender {
+        EndpointSender::new(self.endpoint_tx.clone(), self.shutdown_tx.subscribe())
     }
 
-    // Internal helper method to receive an item from a mutex-protected mpsc receiver,
-    // incorporating a check for the shutdown signal.
-    // Returns None if the channel is closed or if a shutdown is initiated.
-    async fn _receive_with_shutdown_option<T>(
-        &self,
-        receiver_mutex: &Arc<Mutex<mpsc::Receiver<T>>>,
-    ) -> Option<T>
-    where
-        T: Send + 'static,
-    {
-        let mut shutdown_rx = self.shutdown_rx.clone();
-        let mut guard = receiver_mutex.lock().await;
-        tokio::select! {
-            biased;
-            _ = shutdown_rx.changed() => {
-                None
-            }
-            result = guard.recv() => {
-                result
-            }
-        }
+    pub fn register_result_sender(&self) -> ResultSender {
+        ResultSender::new(self.result_tx.clone(), self.shutdown_tx.subscribe())
     }
 
-    // Sends an endpoint to the agents for monitoring.
-    // Uses the internal helper `_send_with_shutdown` for safety.
-    pub async fn send_endpoint(&self, endpoint: Endpoint) -> Result<()> {
-        self._send_with_shutdown(&self.endpoint_tx, endpoint, "endpoint")
+    pub fn register_report_sender(&self) -> ReportSender {
+        ReportSender::new(self.report_tx.clone(), self.shutdown_tx.subscribe())
+    }
+
+    pub fn register_endpoint_receiver(&self) -> EndpointReceiver {
+        EndpointReceiver::new(self.endpoint_rx.clone(), self.shutdown_tx.subscribe())
+    }
+
+    pub fn register_result_receiver(&self) -> ResultReceiver {
+        ResultReceiver::new(self.result_rx.clone(), self.shutdown_tx.subscribe())
+    }
+
+    pub fn register_report_receiver(&self) -> ReportReceiver {
+        ReportReceiver::new(self.report_tx.subscribe(), self.shutdown_tx.subscribe())
+    }
+
+    pub fn register_shutdown_sender(&self) -> ShutdownSender {
+        ShutdownSender::new(self.shutdown_tx.clone())
+    }
+
+    pub fn register_shutdown_receiver(&self) -> ShutdownReceiver {
+        ShutdownReceiver::new(self.shutdown_tx.subscribe())
+    }
+
+    pub fn shutdown(self) {
+        self.shutdown_tx.send(true);
+        drop(self.endpoint_tx);
+        drop(self.endpoint_rx);
+        drop(self.result_tx);
+        drop(self.result_rx);
+        drop(self.report_tx);
+        drop(self.report_rx);
+        drop(self.shutdown_tx);
+        drop(self.shutdown_rx);
+    }
+}
+
+#[derive(Clone)]
+struct MpscSender<T> {
+    tx: mpsc::Sender<T>,
+    shutdown_rx: watch::Receiver<bool>,
+}
+
+impl<T> MpscSender<T>
+where
+    T: Send + fmt::Debug + Sync + 'static,
+{
+    fn new(tx: mpsc::Sender<T>, shutdown_rx: watch::Receiver<bool>) -> Self {
+        Self { tx, shutdown_rx }
+    }
+
+    pub async fn send(&mut self, value: T) -> Result<()> {
+        let value_desc = format!("{:?}", value);
+        self.tx
+            .send(value)
             .await
+            .with_context(|| format!("failed to send value: {:?}", value_desc))
     }
 
-    // Sends a query result from an agent to the controller.
-    // Uses the internal helper `_send_with_shutdown` for safety.
-    pub async fn send_result(&self, result: QueryResult) -> Result<()> {
-        self._send_with_shutdown(&self.result_tx, result, "query result")
-            .await
-    }
-
-    // Sends an endpoint history report via the broadcast channel.
-    // Returns the number of active receivers that received the report, or an error.
-    pub fn send_report(&self, history: EndpointHistory) -> Result<usize> {
-        self.report_tx
-            .send(history)
-            .with_context(|| "failed to send report")
-    }
-
-    // Receives an endpoint from the channel for an agent to process.
-    // Returns None if the channel is closed or shutdown is initiated.
-    pub async fn receive_endpoint(&self) -> Option<Endpoint> {
-        self._receive_with_shutdown_option(&self.endpoint_rx).await
-    }
-
-    // Receives a query result from the channel for the controller to process.
-    // Returns None if the channel is closed or shutdown is initiated.
-    pub async fn receive_result(&self) -> Option<QueryResult> {
-        self._receive_with_shutdown_option(&self.result_rx).await
-    }
-
-    // Receives an endpoint history report from the broadcast channel.
-    // Returns an error if the channel lags or if shutdown is initiated.
-    pub async fn receive_report(&mut self) -> Result<EndpointHistory> {
-        let mut shutdown_rx = self.shutdown_rx.clone();
-        tokio::select! {
-            biased;
-            _ = shutdown_rx.changed() => {
-                Err(anyhow!("broker is shutting down, cannot receive report"))
-            }
-            result = self.report_rx.recv() => {
-                result.map_err(anyhow::Error::from)
-            }
-        }
-    }
-
-    // Initiates the shutdown process by sending a signal on the watch channel.
-    // Panics if sending the signal fails (which should generally not happen).
-    pub fn shutdown(&self) {
-        self.shutdown_tx
-            .send(true)
-            .expect("failed to send shutdown signal");
-    }
-
-    // Waits asynchronously until the shutdown signal is received.
-    // Panics if waiting on the watch channel fails.
-    pub async fn wait_for_shutdown(&mut self) {
+    pub async fn is_shutdown(&mut self) -> Result<()> {
         self.shutdown_rx
             .changed()
             .await
-            .expect("failed to wait for shutdown signal");
+            .with_context(|| "failed to wait for shutdown")
     }
 }
 
-// Implements the Clone trait for the Broker.
-// Cloning creates new handles to the existing channels, allowing multiple
-// components to interact with the same Broker instance.
-// Note that the report_rx is subscribed, creating a new independent receiver.
-impl Clone for Broker {
-    fn clone(&self) -> Self {
-        Self {
-            endpoint_tx: self.endpoint_tx.clone(),
-            endpoint_rx: self.endpoint_rx.clone(),
-            result_tx: self.result_tx.clone(),
-            result_rx: self.result_rx.clone(),
-            report_tx: self.report_tx.clone(),
-            report_rx: self.report_tx.subscribe(),
-            shutdown_tx: self.shutdown_tx.clone(),
-            shutdown_rx: self.shutdown_tx.subscribe(),
-        }
-    }
+// Generic wrapper for MPSC Receiver
+#[derive(Clone)]
+struct MpscReceiver<T> {
+    rx: Arc<Mutex<mpsc::Receiver<T>>>,
+    shutdown_rx: watch::Receiver<bool>,
 }
 
-struct EnddpointSender {
-    endpoint_tx: mpsc::Sender<Endpoint>,
-}
-
-impl EnddpointSender {
-    fn new(endpoint_tx: &mpsc::Sender<Endpoint>) -> Self {
-        Self {
-            endpoint_tx: endpoint_tx.clone(),
-        }
+impl<T> MpscReceiver<T>
+where
+    T: Send + 'static,
+{
+    fn new(rx: Arc<Mutex<mpsc::Receiver<T>>>, shutdown_rx: watch::Receiver<bool>) -> Self {
+        Self { rx, shutdown_rx }
     }
 
-    async fn send(&self, endpoint: Endpoint) -> Result<()> {
-        self.endpoint_tx
-            .send(endpoint)
+    pub async fn receive(&self) -> Option<T> {
+        let mut guard = self.rx.lock().await;
+        guard.recv().await
+    }
+
+    pub async fn is_shutdown(&mut self) -> Result<()> {
+        self.shutdown_rx
+            .changed()
             .await
-            .with_context(|| "failed to send endpoint")
+            .with_context(|| "failed to wait for shutdown")
     }
 }
 
-struct EndpointReceiver {
-    endpoint_rx: Arc<Mutex<mpsc::Receiver<Endpoint>>>,
+// Generic wrapper for Broadcast Sender
+#[derive(Clone)]
+struct BroadcastSender<T> {
+    tx: broadcast::Sender<T>,
+    shutdown_rx: watch::Receiver<bool>,
 }
 
-impl EndpointReceiver {
-    fn new(endpoint_rx: &Arc<Mutex<mpsc::Receiver<Endpoint>>>) -> Self {
-        Self {
-            endpoint_rx: endpoint_rx.clone(),
-        }
+impl<T> BroadcastSender<T>
+where
+    T: Clone + Send + fmt::Debug + Sync + 'static,
+{
+    fn new(tx: broadcast::Sender<T>, shutdown_rx: watch::Receiver<bool>) -> Self {
+        Self { tx, shutdown_rx }
     }
 
-    async fn receive(&self) -> Option<Endpoint> {
-        self.endpoint_rx.lock().await.recv().await
-    }
-}
-
-struct ResultSender {
-    result_tx: mpsc::Sender<QueryResult>,
-}
-
-impl ResultSender {
-    fn new(result_tx: &mpsc::Sender<QueryResult>) -> Self {
-        Self {
-            result_tx: result_tx.clone(),
-        }
+    // Send is synchronous for broadcast channels
+    pub fn send(&self, value: T) -> Result<usize> {
+        let value_desc = format!("{:?}", value);
+        self.tx
+            .send(value)
+            // Reverting to with_context as requested by user
+            .with_context(|| format!("failed to send broadcast value: {}", value_desc))
     }
 
-    async fn send(&self, result: QueryResult) -> Result<()> {
-        self.result_tx
-            .send(result)
+    pub async fn is_shutdown(&mut self) -> Result<()> {
+        self.shutdown_rx
+            .changed()
             .await
-            .with_context(|| "failed to send QueryResult")
+            .with_context(|| "failed to wait for shutdown")
     }
 }
 
-struct ResultReceiver {
-    result_rx: Arc<Mutex<mpsc::Receiver<QueryResult>>>,
+// Generic wrapper for Broadcast Receiver
+// Does not derive Clone as broadcast::Receiver is not Clone
+pub struct BroadcastReceiver<T> {
+    rx: broadcast::Receiver<T>,
+    shutdown_rx: watch::Receiver<bool>,
 }
 
-impl ResultReceiver {
-    fn new(result_rx: &Arc<Mutex<mpsc::Receiver<QueryResult>>>) -> Self {
-        Self {
-            result_rx: result_rx.clone(),
-        }
+impl<T> BroadcastReceiver<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    // Create a new receiver by subscribing to the sender
+    fn new(rx: broadcast::Receiver<T>, shutdown_rx: watch::Receiver<bool>) -> Self {
+        Self { rx, shutdown_rx }
     }
 
-    async fn receive(&self) -> Option<QueryResult> {
-        self.result_rx.lock().await.recv().await
-    }
-}
-
-struct ReportSender {
-    report_tx: broadcast::Sender<EndpointHistory>,
-}
-
-impl ReportSender {
-    fn new(report_tx: &broadcast::Sender<EndpointHistory>) -> Self {
-        Self {
-            report_tx: report_tx.clone(),
-        }
-    }
-
-    async fn send(&self, history: EndpointHistory) -> Result<usize> {
-        self.report_tx
-            .send(history)
-            .with_context(|| "failed to send report")
-    }
-}
-
-struct ReportReceiver {
-    report_rx: broadcast::Receiver<EndpointHistory>,
-}
-
-impl ReportReceiver {
-    fn new(report_tx: &broadcast::Sender<EndpointHistory>) -> Self {
-        Self {
-            report_rx: report_tx.subscribe(),
-        }
-    }
-
-    async fn receive(&mut self) -> Result<EndpointHistory> {
-        self.report_rx
+    pub async fn receive(&mut self) -> Result<T> {
+        self.rx
             .recv()
             .await
-            .with_context(|| "failed to receive report")
+            .with_context(|| format!("receive broadcast value error"))
     }
 }
+
+pub struct ShutdownSender {
+    tx: watch::Sender<bool>,
+}
+
+impl ShutdownSender {
+    pub fn new(tx: watch::Sender<bool>) -> Self {
+        Self { tx }
+    }
+
+    pub fn send(&self) -> Result<()> {
+        self.tx.send(true);
+        Ok(())
+    }
+}
+
+pub struct ShutdownReceiver {
+    rx: watch::Receiver<bool>,
+}
+
+impl ShutdownReceiver {
+    pub fn new(rx: watch::Receiver<bool>) -> Self {
+        Self { rx }
+    }
+
+    pub async fn wait(&mut self) -> Result<()> {
+        self.rx.changed().await?;
+        Ok(())
+    }
+}
+
+// --- Type Aliases for Specific Channel Wrappers ---
+
+pub type EndpointSender = MpscSender<Endpoint>;
+pub type EndpointReceiver = MpscReceiver<Endpoint>;
+pub type ResultSender = MpscSender<QueryResult>;
+pub type ResultReceiver = MpscReceiver<QueryResult>;
+pub type ReportSender = BroadcastSender<EndpointHistory>;
+pub type ReportReceiver = BroadcastReceiver<EndpointHistory>;

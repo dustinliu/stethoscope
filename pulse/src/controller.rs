@@ -5,7 +5,10 @@ use crate::{
     config::{self, Config},
     runnable::Runnable,
 };
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, Weak},
+    time::Duration,
+};
 use tokio::{
     signal::unix::{SignalKind, signal},
     task::JoinHandle,
@@ -29,7 +32,7 @@ const DISPATCHER_NUM: usize = 1;
 /// * `broker` - The central message broker for inter-task communication.
 /// * `config` - Static reference to the application configuration.
 pub struct Controller {
-    broker: Option<Broker>,
+    broker: Arc<Broker>,
     config: &'static Config,
 }
 
@@ -39,7 +42,7 @@ impl Controller {
     /// Initializes the `Broker` and loads the application configuration.
     pub fn new() -> Self {
         Self {
-            broker: Some(Broker::new()),
+            broker: Some(Arc::new(Broker::new())),
             config: config::instance(),
         }
     }
@@ -74,6 +77,8 @@ impl Controller {
             DISPATCHER_NUM,
             Dispatcher::new,
         );
+
+        let shutdown_tx = self.broker.register_shutdown_sender();
 
         // Wait for SIGINT or SIGTERM to initiate shutdown
         let mut sigint_stream = signal(SignalKind::interrupt()).expect("watch SIGINT failed");
@@ -113,11 +118,11 @@ impl Controller {
     fn run_agent<T, F>(&self, num_tasks: usize, task_factory: F) -> JoinHandle<()>
     where
         T: Runnable + Send + Sync + 'static,
-        F: Fn(usize, Broker) -> T,
+        F: Fn(usize, Weak<Broker>) -> T,
     {
         let broker = self.broker.as_ref().expect("broker should exist").clone();
         let agents = (0..num_tasks)
-            .map(|i| Arc::new(tokio::sync::Mutex::new(task_factory(i, broker.clone()))))
+            .map(|i| Arc::new(tokio::sync::Mutex::new(task_factory(i, Arc::downgrade(&broker)))))
             .collect::<Vec<_>>();
 
         let mut handles = Vec::with_capacity(num_tasks);
@@ -180,7 +185,7 @@ impl Controller {
         agent_type: F,
     ) where
         T: Runnable + Send + Sync + 'static,
-        F: Fn(usize, Broker) -> T,
+        F: Fn(usize, Weak<Broker>) -> T,
     {
         tasks.push(TaskHandle {
             name: format!("{} Group", name),
