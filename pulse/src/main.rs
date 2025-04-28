@@ -6,7 +6,6 @@ mod agent;
 mod broker;
 mod config;
 mod controller;
-mod error;
 mod logger;
 mod message;
 mod runnable;

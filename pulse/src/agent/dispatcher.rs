@@ -2,12 +2,12 @@ use std::sync::Weak;
 
 use crate::broker::EndpointSender;
 use crate::config::{self, Config};
-use crate::error::BrokerError;
 use crate::runnable::Runnable;
 use crate::{broker::Broker, message::Endpoint};
 use anyhow::Result;
 use async_trait::async_trait;
 use rand::Rng;
+use tokio::sync::watch;
 use tokio::time::{Duration, MissedTickBehavior, interval};
 
 /// Prefix for dispatcher instance names
@@ -27,10 +27,35 @@ const DISPATCHER_NAME_PREFIX: &str = "Dispatcher";
 pub struct Dispatcher {
     name: String,
     sender: EndpointSender,
+    shutdown_rx: watch::Receiver<bool>,
     config: &'static Config,
 }
 
 impl Dispatcher {
+    /// Creates a new Dispatcher instance.
+    ///
+    /// # Arguments
+    /// * `id` - Unique identifier for this dispatcher instance.
+    /// * `broker` - Cloned `Broker` instance for communication.
+    ///
+    /// # Returns
+    /// A new Dispatcher instance.
+    pub fn new(
+        id: usize,
+        broker: Weak<Broker>,
+        shutdown_rx: watch::Receiver<bool>,
+    ) -> Result<Self> {
+        match broker.upgrade() {
+            Some(broker) => Ok(Self {
+                name: format!("{}-{}", DISPATCHER_NAME_PREFIX, id),
+                sender: broker.endpoint_sender(),
+                shutdown_rx,
+                config: config::instance(),
+            }),
+            None => Err(anyhow::anyhow!("Broker has been dropped or is invalid")),
+        }
+    }
+
     /// Generates a list of endpoints for monitoring.
     ///
     /// Creates endpoints that connect to httpbin.org with random delays between 50ms and 200ms.
@@ -65,31 +90,11 @@ impl Dispatcher {
 
 #[async_trait]
 impl Runnable for Dispatcher {
-    /// Creates a new Dispatcher instance.
-    ///
-    /// # Arguments
-    /// * `id` - Unique identifier for this dispatcher instance.
-    /// * `broker` - Cloned `Broker` instance for communication.
-    ///
-    /// # Returns
-    /// A new Dispatcher instance.
-    fn new(id: usize, broker: Weak<Broker>) -> Result<Self> {
-        match broker.upgrade() {
-            Some(broker) => Ok(Self {
-                name: format!("{}-{}", DISPATCHER_NAME_PREFIX, id),
-                sender: broker.register_endpoint_sender(),
-                config: config::instance(),
-            }),
-            None => Err(anyhow::anyhow!(BrokerError::InvalidBroker)),
-        }
-    }
-
     // The main loop for the dispatcher.
     // Runs periodically based on `config.dispatcher.check_interval`.
     // In each iteration, it calls `dispatch_urls` to generate and send endpoints.
     // If `dispatch_urls` returns an error (indicating shutdown), the loop breaks.
     async fn run(&mut self) {
-        tracing::info!("Starting dispatcher: {}", self.name);
         let mut interval = interval(self.config.dispatcher.check_interval);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -100,13 +105,13 @@ impl Runnable for Dispatcher {
                         tracing::warn!("Dispatcher {} send message failed: {}", self.name, e);
                     }
                 }
-                _ = self.sender.is_shutdown() => {
-                    tracing::info!("Dispatcher {} received shutdown signal", self.name);
+                _ = self.shutdown_rx.changed() => {
+                    tracing::trace!("Dispatcher {} received shutdown signal", self.name);
                     break;
                 }
             }
         }
-        tracing::info!("Dispatcher {} stopped.", self.name);
+        tracing::trace!("Dispatcher {} stopped.", self.name);
     }
 
     /// Returns the name of this dispatcher instance.

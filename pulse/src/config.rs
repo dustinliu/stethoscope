@@ -68,20 +68,12 @@ impl Default for WorkerConfig {
 /// Corresponds to the [reporter] section in the TOML config file.
 #[derive(Debug, Deserialize, Clone)]
 pub struct ReporterConfig {
-    // The buffer size for the alert broadcast channel.
-    #[serde(default = "ReporterConfig::default_alert_buffer_len")]
-    pub alert_buffer_len: usize,
-
     // Whether to enable the stdout reporter.
     #[serde(default = "ReporterConfig::default_enable_stdout")]
     pub enable_stdout: bool,
 }
 
 impl ReporterConfig {
-    // Default alert buffer length (20).
-    fn default_alert_buffer_len() -> usize {
-        20
-    }
     // Default setting for enabling the stdout reporter (false).
     fn default_enable_stdout() -> bool {
         false
@@ -91,7 +83,6 @@ impl ReporterConfig {
 impl Default for ReporterConfig {
     fn default() -> Self {
         Self {
-            alert_buffer_len: Self::default_alert_buffer_len(),
             enable_stdout: Self::default_enable_stdout(),
         }
     }

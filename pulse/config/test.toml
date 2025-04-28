@@ -1,8 +1,9 @@
-log_level = "trace"
 
 [dispatcher]
-check_interval = "2s"
+check_interval = "1m"
+
+[worker]
+num_instance = 20
 
 [reporter]
 enable_stdout = false
-alert_buffer_len = 10

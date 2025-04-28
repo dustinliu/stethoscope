@@ -6,6 +6,7 @@ use crate::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::sync::Weak;
+use tokio::sync::watch;
 
 /// Prefix for worker instance names
 const WORKER_NAME_PREFIX: &str = "Worker";
@@ -24,10 +25,33 @@ pub struct Worker {
     name: String,
     endpoint_rx: EndpointReceiver,
     result_tx: ResultSender,
+    shutdown_rx: watch::Receiver<bool>,
     client: reqwest::Client,
 }
 
 impl Worker {
+    pub fn new(
+        id: usize,
+        broker: Weak<Broker>,
+        shutdown_rx: watch::Receiver<bool>,
+    ) -> Result<Self> {
+        if let Some(broker) = broker.upgrade() {
+            Ok(Self {
+                name: format!("{}-{}", WORKER_NAME_PREFIX, id),
+                endpoint_rx: broker.endpoint_receiver(),
+                result_tx: broker.result_sender(),
+                shutdown_rx,
+                client: reqwest::ClientBuilder::new()
+                    .pool_max_idle_per_host(0) // Disable keeping idle connections
+                    .pool_idle_timeout(std::time::Duration::from_secs(0)) // Set idle timeout to 0
+                    .build()
+                    .with_context(|| "Failed to build reqwest client {}")?,
+            })
+        } else {
+            Err(anyhow::anyhow!("Broker is not alive"))
+        }
+    }
+
     /// The main loop for the worker.
     /// Continuously receives `Endpoint`s from the broker's endpoint channel.
     /// For each endpoint, it performs an HTTP GET request, records the result
@@ -48,14 +72,19 @@ impl Worker {
             .send()
             .await
         {
-            Ok(response) => QueryResult {
-                endpoint,
-                record: QueryRecord {
-                    status: response.status(),
-                    timestamp,
-                    duration: start_time.elapsed(),
-                },
-            },
+            Ok(response) => {
+                let result = QueryResult {
+                    endpoint,
+                    record: QueryRecord {
+                        status: response.status(),
+                        timestamp,
+                        duration: start_time.elapsed(),
+                    },
+                };
+                tracing::trace!("{} received response: {:?}", self.name, result);
+                result
+            }
+
             Err(e) => {
                 if e.is_connect() {
                     QueryResult {
@@ -105,23 +134,6 @@ impl Worker {
 
 #[async_trait]
 impl Runnable for Worker {
-    fn new(id: usize, broker: Weak<Broker>) -> Result<Self> {
-        if let Some(broker) = broker.upgrade() {
-            Ok(Self {
-                name: format!("{}-{}", WORKER_NAME_PREFIX, id),
-                endpoint_rx: broker.register_endpoint_receiver(),
-                result_tx: broker.register_result_sender(),
-                client: reqwest::ClientBuilder::new()
-                    .pool_max_idle_per_host(0) // Disable keeping idle connections
-                    .pool_idle_timeout(std::time::Duration::from_secs(0)) // Set idle timeout to 0
-                    .build()
-                    .with_context(|| "Failed to build reqwest client {}")?,
-            })
-        } else {
-            Err(anyhow::anyhow!("Broker is not alive"))
-        }
-    }
-
     /// Starts the worker's main processing loop (`process_endpoint`).
     async fn run(&mut self) {
         loop {
@@ -129,12 +141,7 @@ impl Runnable for Worker {
                 Some(endpoint) = self.endpoint_rx.receive() => {
                     self.process_endpoint(endpoint).await;
                 }
-                _ = self.result_tx.is_shutdown() => {
-                    tracing::info!("{}: Shutdown signal received", self.name);
-                    break;
-                }
-                else => {
-                    tracing::info!("{}: Endpoint channel closed, shutting down.", self.name);
+                _ = self.shutdown_rx.changed() => {
                     break;
                 }
             }
@@ -194,8 +201,9 @@ mod tests {
         server.expect(expectation);
 
         let broker = Arc::new(Broker::new());
-        let mut worker =
-            Worker::new(0, Arc::downgrade(&broker)).expect("Failed to create worker for test");
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let mut worker = Worker::new(0, Arc::downgrade(&broker), shutdown_rx)
+            .expect("Failed to create worker for test");
 
         let worker_handle = tokio::spawn(async move {
             worker.run().await;
@@ -208,12 +216,8 @@ mod tests {
             failure_threshold: 3,
         };
 
-        broker
-            .register_endpoint_sender()
-            .send(endpoint)
-            .await
-            .unwrap();
-        let result = broker.register_result_receiver().receive().await.unwrap();
+        broker.endpoint_sender().send(endpoint).await.unwrap();
+        let result = broker.result_receiver().receive().await.unwrap();
 
         worker_handle.abort();
 
@@ -274,19 +278,16 @@ mod tests {
         };
 
         let broker = Arc::new(Broker::new());
-        let mut worker = Worker::new(0, Arc::downgrade(&broker))
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let mut worker = Worker::new(0, Arc::downgrade(&broker), shutdown_rx)
             .expect("Failed to create worker for connection error test");
 
         let worker_handle = tokio::spawn(async move {
             worker.run().await;
         });
 
-        broker
-            .register_endpoint_sender()
-            .send(endpoint)
-            .await
-            .unwrap();
-        let result = broker.register_result_receiver().receive().await.unwrap();
+        broker.endpoint_sender().send(endpoint).await.unwrap();
+        let result = broker.result_receiver().receive().await.unwrap();
 
         worker_handle.abort();
 

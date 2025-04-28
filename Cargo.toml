@@ -1,3 +1,7 @@
 [workspace]
+members = [
+    "web",
+    "pulse",
+    "pulse_proc_macros",
+]
 resolver = "3"
-members = ["ui", "pulse", "pulse_proc_macros"]
