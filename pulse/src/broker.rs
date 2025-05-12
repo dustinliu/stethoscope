@@ -1,73 +1,98 @@
 use crate::{
-    config,
+    config::Config,
     message::{Endpoint, QueryResult},
 };
 use anyhow::{Context, Result};
-use std::{fmt, sync::Arc};
-use tokio::sync::{Mutex, mpsc};
+use std::{
+    fmt,
+    sync::{Arc, Mutex},
+};
+use tokio::sync::mpsc;
+
+#[derive(Debug)]
+struct MpscHolder<T> {
+    state: Mutex<MpscState<T>>,
+    rx: Arc<tokio::sync::Mutex<mpsc::Receiver<T>>>,
+}
+
+#[derive(Debug)]
+struct MpscState<T> {
+    tx: Option<mpsc::Sender<T>>,
+    weak_tx: Option<mpsc::WeakSender<T>>,
+}
+
+impl<T> MpscHolder<T> {
+    fn new(capacity: usize) -> Self {
+        let (tx, rx) = mpsc::channel(capacity);
+        Self {
+            state: Mutex::new(MpscState {
+                tx: Some(tx),
+                weak_tx: None,
+            }),
+            rx: Arc::new(tokio::sync::Mutex::new(rx)),
+        }
+    }
+
+    fn receiver(&self) -> Arc<tokio::sync::Mutex<mpsc::Receiver<T>>> {
+        self.rx.clone()
+    }
+
+    fn sender(&self) -> mpsc::Sender<T> {
+        let mut state = self.state.lock().expect("Failed to lock MpscState");
+
+        if let Some(weak_tx) = &state.weak_tx {
+            if let Some(tx) = weak_tx.upgrade() {
+                return tx;
+            }
+        }
+
+        if let Some(tx) = state.tx.take() {
+            state.weak_tx = Some(tx.downgrade());
+            return tx;
+        }
+
+        //this should never happen
+        panic!("sender already taken");
+    }
+}
 
 // The Broker struct acts as a central message hub for different components
 // of the application (controller, agents, reporter). It facilitates communication
 // between these components using asynchronous channels.
 #[derive(Debug)]
 pub struct Broker {
-    // Channel for sending endpoints to be monitored by agents.
-    endpoint_tx: mpsc::Sender<Endpoint>,
-    // Channel for receiving endpoints (shared access for multiple agents).
-    endpoint_rx: Arc<Mutex<mpsc::Receiver<Endpoint>>>,
-    // Channel for sending query results from agents.
-    result_tx: mpsc::Sender<QueryResult>,
-    // Channel for receiving query results (shared access for the controller).
-    result_rx: Arc<Mutex<mpsc::Receiver<QueryResult>>>,
-    // Broadcast channel for sending endpoint history reports to reporters.
-}
-
-impl Default for Broker {
-    fn default() -> Self {
-        Self::new()
-    }
+    endpoint_holder: MpscHolder<Endpoint>,
+    result_holder: MpscHolder<QueryResult>,
 }
 
 impl Broker {
     // Creates a new Broker instance, initializing all the necessary channels.
-    // Channel buffer sizes and other configurations are taken from the global config.
-    pub fn new() -> Self {
-        let worker_num = config::instance().worker.num_instance;
-        let (endpoint_tx, endpoint_rx) = mpsc::channel(worker_num / 3);
-        let (result_tx, result_rx) = mpsc::channel(worker_num);
-
-        let endpoint_rx = Arc::new(Mutex::new(endpoint_rx));
-        let result_rx = Arc::new(Mutex::new(result_rx));
-
+    // Channel buffer sizes are derived from the provided worker configuration.
+    pub fn new(config: &Config) -> Self {
         Self {
-            endpoint_tx,
-            endpoint_rx,
-            result_tx,
-            result_rx,
+            endpoint_holder: MpscHolder::new(config.worker.num_instance),
+            result_holder: MpscHolder::new(config.worker.num_instance),
         }
     }
 
     pub fn endpoint_sender(&self) -> EndpointSender {
-        EndpointSender::new(self.endpoint_tx.clone())
+        EndpointSender::new(self.endpoint_holder.sender())
     }
 
     pub fn result_sender(&self) -> ResultSender {
-        ResultSender::new(self.result_tx.clone())
+        ResultSender::new(self.result_holder.sender())
     }
 
     pub fn endpoint_receiver(&self) -> EndpointReceiver {
-        EndpointReceiver::new(self.endpoint_rx.clone())
+        EndpointReceiver::new(self.endpoint_holder.receiver())
     }
 
     pub fn result_receiver(&self) -> ResultReceiver {
-        ResultReceiver::new(self.result_rx.clone())
+        ResultReceiver::new(self.result_holder.receiver())
     }
 
     pub fn shutdown(self) {
-        drop(self.endpoint_tx);
-        drop(self.endpoint_rx);
-        drop(self.result_tx);
-        drop(self.result_rx);
+        // MpscHolder 會在 drop 時自動清理資源
     }
 }
 
@@ -96,14 +121,14 @@ where
 // Generic wrapper for MPSC Receiver
 #[derive(Clone)]
 pub struct MpscReceiver<T> {
-    rx: Arc<Mutex<mpsc::Receiver<T>>>,
+    rx: Arc<tokio::sync::Mutex<mpsc::Receiver<T>>>,
 }
 
 impl<T> MpscReceiver<T>
 where
     T: Send + 'static,
 {
-    fn new(rx: Arc<Mutex<mpsc::Receiver<T>>>) -> Self {
+    fn new(rx: Arc<tokio::sync::Mutex<mpsc::Receiver<T>>>) -> Self {
         Self { rx }
     }
 

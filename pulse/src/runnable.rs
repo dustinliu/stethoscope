@@ -40,18 +40,16 @@ impl TasksGroup {
     }
 
     pub async fn wait_for_shutdown(&mut self, handle_timeout: Duration, group_timeout: Duration) {
-        tracing::debug!(
-            "{} waiting for shutdown, timeout {} seconds",
-            self.name,
-            group_timeout.as_secs()
-        );
+        tracing::debug!("{} waiting for shutdown", self.name);
         match timeout(group_timeout, self.shutdown(handle_timeout)).await {
-            Ok(()) => (),
+            Ok(()) => {
+                tracing::info!("{} shutdown complete", self.name);
+            }
             Err(_) => {
                 tracing::warn!(
                     "{} shutdown timed out after {} seconds",
                     self.name,
-                    handle_timeout.as_secs()
+                    group_timeout.as_secs()
                 );
             }
         }
@@ -60,15 +58,11 @@ impl TasksGroup {
     pub async fn shutdown(&mut self, wait_timeout: Duration) {
         for (i, handle) in self.handles.iter_mut().enumerate() {
             let task = self.tasks[i].lock().await;
-            tracing::debug!(
-                "{} waiting for shutdown, timeout {} seconds",
-                task.name(),
-                wait_timeout.as_secs()
-            );
-            match timeout(wait_timeout, handle).await {
+            tracing::debug!("{} waiting for {} seconds", task.name(), wait_timeout.as_secs());
+            match timeout(wait_timeout, &mut *handle).await {
                 Ok(result) => match result {
                     Ok(()) => {
-                        tracing::info!("{} shutdown complete", task.name());
+                        tracing::debug!("{} shutdown complete", task.name());
                     }
 
                     Err(_) => {
@@ -82,6 +76,7 @@ impl TasksGroup {
                         task.name(),
                         wait_timeout.as_secs()
                     );
+                    handle.abort();
                 }
             }
         }

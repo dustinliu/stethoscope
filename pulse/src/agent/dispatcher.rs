@@ -4,7 +4,7 @@ use crate::broker::EndpointSender;
 use crate::config::{self, Config};
 use crate::runnable::Runnable;
 use crate::{broker::Broker, message::Endpoint};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use rand::Rng;
 use tokio::sync::watch;
@@ -29,6 +29,7 @@ pub struct Dispatcher {
     sender: EndpointSender,
     shutdown_rx: watch::Receiver<bool>,
     config: &'static Config,
+    shutdown_flag: bool,
 }
 
 impl Dispatcher {
@@ -51,6 +52,7 @@ impl Dispatcher {
                 sender: broker.endpoint_sender(),
                 shutdown_rx,
                 config: config::instance(),
+                shutdown_flag: false,
             }),
             None => Err(anyhow::anyhow!("Broker has been dropped or is invalid")),
         }
@@ -63,7 +65,7 @@ impl Dispatcher {
     /// # Returns
     /// A vector of `Endpoint` instances.
     fn gen_urls() -> Vec<Endpoint> {
-        let mut rng = rand::rng();
+        let mut rng = rand::rng(); // Reverted back to rand::rng()
         (0..=100)
             .map(|i| {
                 let delay = rng.random_range(50..=200) as f64 / 1000.0; // Random delay between 50ms to 200ms
@@ -79,9 +81,24 @@ impl Dispatcher {
 
     async fn dispatch_urls(&mut self) -> Result<()> {
         for url in Self::gen_urls() {
-            if let Err(e) = self.sender.send(url).await {
-                tracing::warn!("Dispatcher {} send message failed: {}", self.name, e);
-                return Err(e);
+            tokio::select! {
+                // Attempt to send the endpoint
+                res = self.sender.send(url) => {
+                    if let Err(send_error) = res {
+                        // Log the error. SendError usually means the receiver is dropped (channel closed).
+                        tracing::warn!("Dispatcher {} failed to send message: {}", self.name, send_error);
+                        // Treat channel closed as a terminal error for dispatching.
+                        // Convert SendError into anyhow::Error for consistent error handling.
+                        // `send_error` itself implements `std::error::Error`, so we can call context() directly.
+                        return Err(send_error).context("Endpoint channel closed");
+                    }
+                }
+                // Check for shutdown signal
+                _ = self.shutdown_rx.changed() => {
+                    tracing::debug!("Dispatcher {} interrupted during dispatch by shutdown signal", self.name);
+                    self.shutdown_flag = true;
+                    return Ok(());
+                }
             }
         }
         Ok(())
@@ -99,15 +116,20 @@ impl Runnable for Dispatcher {
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    if let Err(e) = self.dispatch_urls().await {
-                        tracing::warn!("Dispatcher {} send message failed: {}", self.name, e);
+            if self.shutdown_flag {
+                break;
+            } else {
+                tokio::select! {
+                        _ = interval.tick() => {
+                            if let Err(e) = self.dispatch_urls().await {
+                            tracing::warn!("Dispatcher {} send message failed: {}", self.name, e);
+                        }
                     }
-                }
-                _ = self.shutdown_rx.changed() => {
-                    tracing::trace!("Dispatcher {} received shutdown signal", self.name);
-                    break;
+                    _ = self.shutdown_rx.changed() => {
+                        tracing::trace!("Dispatcher {} received shutdown signal", self.name);
+                        self.shutdown_flag = true;
+                        break;
+                    }
                 }
             }
         }

@@ -1,6 +1,6 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::sync::OnceLock;
+use std::{path::PathBuf, sync::OnceLock};
 use tokio::time::Duration;
 
 // Parses a duration string (e.g., "5s", "1m") into a `tokio::time::Duration`.
@@ -104,56 +104,201 @@ pub struct Config {
     pub reporter: ReporterConfig,
 }
 
-// Global static instance of the configuration, loaded once.
+// Use OnceLock for lazy, thread-safe initialization of the static config.
 static INSTANCE: OnceLock<Config> = OnceLock::new();
 
 impl Config {
-    // Attempts to load the configuration from a TOML file.
-    // Searches for the file in a predefined list of candidate paths.
-    // If no file is found or parsing fails, returns an error.
-    pub fn from_toml_file(_unused: &str) -> anyhow::Result<Self> {
-        // List of candidate config paths
-        let candidates = [
-            "./test.toml",
-            "./pulse.toml",
-            "./config/test.toml",
-            "./config/pulse.toml",
-            "./pulse/config/test.toml",
-            "./pulse/config/pulse.toml",
-        ];
-        let mut last_err = None;
-        for path in &candidates {
-            let content = match std::fs::read_to_string(path) {
-                Ok(c) => c,
-                Err(e) => {
-                    last_err = Some(anyhow::anyhow!("Failed to read {}: {}", path, e));
-                    continue;
+    /// Initializes the global configuration instance from a TOML file.
+    ///
+    /// This function should be called once, typically at application startup.
+    /// It attempts to load the configuration from the specified `config_path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The configuration file cannot be read or parsed.
+    /// - The configuration has already been initialized (e.g., by a previous call).
+    pub fn init(config_path: &PathBuf) -> Result<(), anyhow::Error> {
+        match Self::load_from_file(config_path) {
+            Ok(config) => {
+                tracing::debug!("Configuration: {:?}", config);
+                // Attempt to set the loaded config.
+                if INSTANCE.set(config).is_err() {
+                    // This happens if init() was called more than once.
+                    anyhow::bail!("Configuration has already been initialized.");
                 }
-            };
-            match toml::from_str::<Config>(&content) {
-                Ok(config) => {
-                    tracing::debug!("config: {:?}", config);
-                    return Ok(config);
-                }
-                Err(e) => {
-                    last_err = Some(anyhow::anyhow!("Failed to parse {}: {}", path, e));
-                }
+                Ok(())
+            }
+            Err(e) => {
+                // If loading from file failed, propagate the error.
+                // Do not set default config here.
+                Err(e).context(format!(
+                    "Failed to initialize configuration from {}",
+                    config_path.display()
+                ))
             }
         }
+    }
 
-        tracing::warn!("No config file found or failed to parse, using default config");
-        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("No suitable config file found")))
+    // Loads configuration from a TOML file.
+    fn load_from_file(config_path: &PathBuf) -> Result<Self> {
+        let content = std::fs::read_to_string(config_path)?;
+        toml::from_str::<Config>(&content)
+            .with_context(|| format!("Failed to parse config file: {}", config_path.display()))
     }
 }
 
-// Returns a static reference to the global configuration instance.
-// If the configuration hasn't been loaded yet, it attempts to load it
-// from a TOML file. If loading fails, it falls back to the default configuration.
+/// Returns a static reference to the global configuration instance.
+///
+/// Panics if the configuration hasn't been initialized by calling `Config::init()` first.
 pub fn instance() -> &'static Config {
-    INSTANCE.get_or_init(|| {
-        Config::from_toml_file("config.toml").unwrap_or_else(|e| {
-            tracing::warn!("Failed to load config: {}. Using default config.", e);
-            Config::default()
-        })
-    })
+    INSTANCE
+        .get()
+        .expect("Configuration has not been initialized. Call Config::init() first.")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    // Helper function to create a temporary config file with given content.
+    fn create_temp_config(content: &str) -> NamedTempFile {
+        let mut file = NamedTempFile::new().expect("Failed to create temp file");
+        file.write_all(content.as_bytes())
+            .expect("Failed to write to temp file");
+        file
+    }
+
+    #[test]
+    fn test_load_valid_config() {
+        let config_content = r#"
+[dispatcher]
+check_interval = "10s"
+
+[worker]
+num_instance = 5
+
+[reporter]
+enable_stdout = true
+"#;
+        let temp_file = create_temp_config(config_content);
+        let config_path = temp_file.path().to_path_buf();
+
+        let config_result = Config::load_from_file(&config_path);
+        assert!(config_result.is_ok());
+        let config = config_result.unwrap();
+
+        assert_eq!(config.dispatcher.check_interval, Duration::from_secs(10));
+        assert_eq!(config.worker.num_instance, 5);
+        assert!(config.reporter.enable_stdout);
+    }
+
+    #[test]
+    fn test_load_partial_config_uses_defaults() {
+        let config_content = r#"
+[worker]
+num_instance = 20
+"#;
+        let temp_file = create_temp_config(config_content);
+        let config_path = temp_file.path().to_path_buf();
+
+        let config_result = Config::load_from_file(&config_path);
+        assert!(config_result.is_ok());
+        let config = config_result.unwrap();
+
+        // Check specified value
+        assert_eq!(config.worker.num_instance, 20);
+
+        // Check default values for missing sections/fields
+        assert_eq!(config.dispatcher.check_interval, DispatcherConfig::default_check_interval());
+        assert_eq!(config.reporter.enable_stdout, ReporterConfig::default_enable_stdout());
+    }
+
+    #[test]
+    fn test_load_empty_config_uses_defaults() {
+        let config_content = ""; // Empty config file
+        let temp_file = create_temp_config(config_content);
+        let config_path = temp_file.path().to_path_buf();
+
+        let config_result = Config::load_from_file(&config_path);
+        assert!(config_result.is_ok());
+        let config = config_result.unwrap();
+
+        // Check all default values individually since Config::default() is removed
+        assert_eq!(config.dispatcher.check_interval, DispatcherConfig::default_check_interval());
+        assert_eq!(config.worker.num_instance, WorkerConfig::default_num_instance());
+        assert_eq!(config.reporter.enable_stdout, ReporterConfig::default_enable_stdout());
+    }
+
+    #[test]
+    fn test_load_invalid_toml() {
+        let config_content = r#"
+[dispatcher
+check_interval = "10s" # Missing closing bracket
+"#;
+        let temp_file = create_temp_config(config_content);
+        let config_path = temp_file.path().to_path_buf();
+
+        let config_result = Config::load_from_file(&config_path);
+        assert!(config_result.is_err());
+        let err = config_result.unwrap_err();
+        // Check that the error is caused by toml parse error
+        let found = err.chain().any(|e| e.is::<toml::de::Error>());
+        assert!(found, "Error should be toml::de::Error");
+    }
+
+    #[test]
+    fn test_load_non_existent_file() {
+        let config_path = PathBuf::from("non_existent_config_file.toml");
+        let config_result = Config::load_from_file(&config_path);
+        assert!(config_result.is_err());
+        let err = config_result.unwrap_err();
+        // Check that the error is caused by std::io::ErrorKind::NotFound
+        let io_err = err
+            .downcast_ref::<std::io::Error>()
+            .expect("Error should be std::io::Error");
+        assert_eq!(io_err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn test_load_config_with_invalid_duration() {
+        let config_content = r#"
+[dispatcher]
+check_interval = "5xyz" # Invalid duration format
+"#;
+        let temp_file = create_temp_config(config_content);
+        let config_path = temp_file.path().to_path_buf();
+
+        let config_result = Config::load_from_file(&config_path);
+        assert!(config_result.is_err());
+        let err = config_result.unwrap_err();
+        // Check that the error is caused by toml parse error
+        let found = err.chain().any(|e| e.is::<toml::de::Error>());
+        assert!(found, "Error should be toml::de::Error");
+    }
+
+    #[test]
+    fn test_load_config_with_wrong_type() {
+        let config_content = r#"
+ [worker]
+ num_instance = "not a number"
+ "#;
+        let temp_file = create_temp_config(config_content);
+        let config_path = temp_file.path().to_path_buf();
+
+        let config_result = Config::load_from_file(&config_path);
+        assert!(config_result.is_err());
+        let err = config_result.unwrap_err();
+        // Check that the error is caused by toml parse error
+        let found = err.chain().any(|e| e.is::<toml::de::Error>());
+        assert!(found, "Error should be toml::de::Error");
+    }
+
+    // Note: Testing `init()` and `instance()` directly is complex due to the static nature
+    // of `INSTANCE: OnceLock`. The state persists across tests run in the same process.
+    // Testing `load_from_file` covers the core logic of reading and parsing the config.
+    // After a successful call to `init()` in your application's main function,
+    // `instance()` should return the loaded configuration or panic if `init()` failed or wasn't called.
 }

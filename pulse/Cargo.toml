@@ -17,9 +17,12 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
 tracing-appender = "0.2.3"
 pulse_proc_macros = { path = "../pulse_proc_macros" }
 thiserror = "2.0.12"
+clap = { version = "4.5.37", features = ["derive", "env"] }
+dotenvy = { version = "0.15.7" }
 rand = "0.9.1"
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
 httptest = "0.16.3"
 mockall = "0.13.1"
+tempfile = "3.19.1"

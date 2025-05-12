@@ -157,6 +157,7 @@ impl Runnable for Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{self, Config};
     use crate::message::{Endpoint, QueryResult};
     use httptest::{
         Expectation, Server,
@@ -200,7 +201,8 @@ mod tests {
 
         server.expect(expectation);
 
-        let broker = Arc::new(Broker::new());
+        let config = Config::default();
+        let broker = Arc::new(Broker::new(&config));
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
         let mut worker = Worker::new(0, Arc::downgrade(&broker), shutdown_rx)
             .expect("Failed to create worker for test");
@@ -277,7 +279,8 @@ mod tests {
             failure_threshold: 3,
         };
 
-        let broker = Arc::new(Broker::new());
+        let test_config = config::Config::default();
+        let broker = Arc::new(Broker::new(&test_config));
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
         let mut worker = Worker::new(0, Arc::downgrade(&broker), shutdown_rx)
             .expect("Failed to create worker for connection error test");
