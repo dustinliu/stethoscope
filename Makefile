@@ -1,20 +1,18 @@
-# Project root Makefile: delegate to pulse/Makefile
-
-PULSE_MAKE := $(MAKE) -C pulse
+# Makefile for pulse Rust crate
 
 .PHONY: build build-release run run-release clean
 
 build:
-	$(PULSE_MAKE) build
+	cargo build
 
 build-release:
-	$(PULSE_MAKE) build-release
+	cargo build --release
 
 run:
-	$(PULSE_MAKE) run
+	cargo run
 
 run-release:
-	$(PULSE_MAKE) run-release
+	cargo run --release
 
 clean:
-	$(PULSE_MAKE) clean
+	cargo clean
