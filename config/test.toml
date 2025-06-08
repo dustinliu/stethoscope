@@ -1,5 +1,3 @@
-
-[dispatcher]
 check_interval = "1m"
 
 [worker]

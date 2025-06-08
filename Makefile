@@ -8,8 +8,8 @@ build:
 build-release:
 	cargo build --release
 
-run-dev:
-	cargo watch -x run -- --config ./config/test.toml
+run-dev: build
+	cargo run -- --config ./config/test.toml
 
 run-release:
 	cargo run --release

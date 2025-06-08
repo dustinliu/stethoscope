@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::{path::PathBuf, sync::OnceLock};
+use std::path::PathBuf;
 use tokio::time::Duration;
+
+const DEFAULT_CHECK_INTERVAL: Duration = Duration::from_secs(300); // Default check interval of 5 minutes
 
 // Parses a duration string (e.g., "5s", "1m") into a `tokio::time::Duration`.
 // Used for deserializing duration values from the config file.
@@ -11,33 +13,6 @@ where
 {
     let s = String::deserialize(deserializer)?;
     humantime::parse_duration(&s).map_err(serde::de::Error::custom)
-}
-
-/// Configuration specific to the Dispatcher component.
-/// Corresponds to the [dispatcher] section in the TOML config file.
-#[derive(Debug, Deserialize, Clone)]
-pub struct DispatcherConfig {
-    // How often the dispatcher checks for new endpoints or updates.
-    #[serde(
-        default = "DispatcherConfig::default_check_interval",
-        deserialize_with = "parse_duration"
-    )]
-    pub check_interval: Duration,
-}
-
-impl DispatcherConfig {
-    // Default check interval for the dispatcher (5 minutes).
-    fn default_check_interval() -> Duration {
-        Duration::from_secs(300)
-    }
-}
-
-impl Default for DispatcherConfig {
-    fn default() -> Self {
-        Self {
-            check_interval: Self::default_check_interval(),
-        }
-    }
 }
 
 /// Configuration specific to the Worker components.
@@ -71,6 +46,9 @@ pub struct ReporterConfig {
     // Whether to enable the stdout reporter.
     #[serde(default = "ReporterConfig::default_enable_stdout")]
     pub enable_stdout: bool,
+
+    // Optional file path for file reporter. If specified, file reporter will be enabled.
+    pub file_path: Option<String>,
 }
 
 impl ReporterConfig {
@@ -84,16 +62,16 @@ impl Default for ReporterConfig {
     fn default() -> Self {
         Self {
             enable_stdout: Self::default_enable_stdout(),
+            file_path: None,
         }
     }
 }
 
 /// Represents the overall application configuration, loaded from a TOML file.
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Config {
-    // Dispatcher specific configuration.
-    #[serde(default)]
-    pub dispatcher: DispatcherConfig,
+    #[serde(deserialize_with = "parse_duration")]
+    pub check_interval: Duration,
 
     // Worker specific configuration.
     #[serde(default)]
@@ -104,40 +82,9 @@ pub struct Config {
     pub reporter: ReporterConfig,
 }
 
-// Use OnceLock for lazy, thread-safe initialization of the static config.
-static INSTANCE: OnceLock<Config> = OnceLock::new();
-
 impl Config {
-    /// Initializes the global configuration instance from a TOML file.
-    ///
-    /// This function should be called once, typically at application startup.
-    /// It attempts to load the configuration from the specified `config_path`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The configuration file cannot be read or parsed.
-    /// - The configuration has already been initialized (e.g., by a previous call).
-    pub fn init(config_path: &PathBuf) -> Result<(), anyhow::Error> {
-        match Self::load_from_file(config_path) {
-            Ok(config) => {
-                tracing::debug!("Configuration: {:?}", config);
-                // Attempt to set the loaded config.
-                if INSTANCE.set(config).is_err() {
-                    // This happens if init() was called more than once.
-                    anyhow::bail!("Configuration has already been initialized.");
-                }
-                Ok(())
-            }
-            Err(e) => {
-                // If loading from file failed, propagate the error.
-                // Do not set default config here.
-                Err(e).context(format!(
-                    "Failed to initialize configuration from {}",
-                    config_path.display()
-                ))
-            }
-        }
+    pub fn new(config_path: &PathBuf) -> Result<Self> {
+        Self::load_from_file(config_path)
     }
 
     // Loads configuration from a TOML file.
@@ -148,13 +95,14 @@ impl Config {
     }
 }
 
-/// Returns a static reference to the global configuration instance.
-///
-/// Panics if the configuration hasn't been initialized by calling `Config::init()` first.
-pub fn instance() -> &'static Config {
-    INSTANCE
-        .get()
-        .expect("Configuration has not been initialized. Call Config::init() first.")
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            check_interval: DEFAULT_CHECK_INTERVAL, // Default check interval
+            worker: WorkerConfig::default(),
+            reporter: ReporterConfig::default(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -174,7 +122,6 @@ mod tests {
     #[test]
     fn test_load_valid_config() {
         let config_content = r#"
-[dispatcher]
 check_interval = "10s"
 
 [worker]
@@ -190,7 +137,7 @@ enable_stdout = true
         assert!(config_result.is_ok());
         let config = config_result.unwrap();
 
-        assert_eq!(config.dispatcher.check_interval, Duration::from_secs(10));
+        assert_eq!(config.check_interval, Duration::from_secs(10));
         assert_eq!(config.worker.num_instance, 5);
         assert!(config.reporter.enable_stdout);
     }
@@ -198,6 +145,8 @@ enable_stdout = true
     #[test]
     fn test_load_partial_config_uses_defaults() {
         let config_content = r#"
+check_interval = "15s"
+
 [worker]
 num_instance = 20
 "#;
@@ -212,13 +161,15 @@ num_instance = 20
         assert_eq!(config.worker.num_instance, 20);
 
         // Check default values for missing sections/fields
-        assert_eq!(config.dispatcher.check_interval, DispatcherConfig::default_check_interval());
+        assert_eq!(config.check_interval, Duration::from_secs(15));
         assert_eq!(config.reporter.enable_stdout, ReporterConfig::default_enable_stdout());
     }
 
     #[test]
     fn test_load_empty_config_uses_defaults() {
-        let config_content = ""; // Empty config file
+        let config_content = r#"
+check_interval = "300s"
+"#; // Config file with only required field
         let temp_file = create_temp_config(config_content);
         let config_path = temp_file.path().to_path_buf();
 
@@ -227,7 +178,7 @@ num_instance = 20
         let config = config_result.unwrap();
 
         // Check all default values individually since Config::default() is removed
-        assert_eq!(config.dispatcher.check_interval, DispatcherConfig::default_check_interval());
+        assert_eq!(config.check_interval, DEFAULT_CHECK_INTERVAL);
         assert_eq!(config.worker.num_instance, WorkerConfig::default_num_instance());
         assert_eq!(config.reporter.enable_stdout, ReporterConfig::default_enable_stdout());
     }
@@ -265,7 +216,6 @@ check_interval = "10s" # Missing closing bracket
     #[test]
     fn test_load_config_with_invalid_duration() {
         let config_content = r#"
-[dispatcher]
 check_interval = "5xyz" # Invalid duration format
 "#;
         let temp_file = create_temp_config(config_content);

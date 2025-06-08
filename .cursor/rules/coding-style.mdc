@@ -1,5 +1,5 @@
 ---
-description: 
+description:
 globs: *.rs
 alwaysApply: false
 ---
@@ -17,7 +17,7 @@ alwaysApply: false
 * Lifetimes: Short, lowercase, start with `'` (e.g., `'a`, `'b`, `'static`).
 
 ## Comments & Documentation
-* Doc Comments: `///` for public API items (functions, types, etc.). Use Markdown. Explain purpose, usage, parameters, returns, errors (`Result`), panics, and safety (for `unsafe`).
+* Doc Comments: `///` for library crate public API items (functions, types, etc.). Use Markdown. Explain purpose, usage, parameters, returns, errors (`Result`), panics, and safety (for `unsafe`).
 * Module/Crate Docs: `//!` at the beginning of the file or `mod` block.
 * Implementation Comments: `//` for internal details.
 
